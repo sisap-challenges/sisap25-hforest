@@ -74,7 +74,7 @@ jobs:
       - name: Check space after download
         run: df
       - name: Run Task1
-        run: python3 sisap2025.py task1wf
+        run: python3 -u sisap2025.py task1wf
       - name: Check space after solutions
         run: df
 
@@ -149,7 +149,7 @@ jobs:
       - name: Check space after download
         run: df
       - name: Run Task2
-        run: python3 sisap2025.py task2
+        run: python3 -u sisap2025.py task2
       - name: Check space after solutions
         run: df
 
@@ -221,7 +221,7 @@ jobs:
       - name: Check space after download
         run: df
       - name: Run Task1
-        run: python3 sisap2025faiss.py task1
+        run: python3 -u sisap2025faiss.py task1
       - name: Check space after solutions
         run: df
 
@@ -294,6 +294,6 @@ jobs:
       - name: Check space after download
         run: df
       - name: Run Task2
-        run: python3 sisap2025faiss.py task2
+        run: python3 -u sisap2025faiss.py task2
       - name: Check space after solutions
         run: df
