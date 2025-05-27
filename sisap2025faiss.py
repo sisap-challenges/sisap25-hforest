@@ -6,6 +6,7 @@ import numpy as np
 import time
 import os
 import sys
+from pathlib import Path
 
 def store_results(dst, algo, dataset, task, D, I, buildtime, querytime, params):
     os.makedirs(Path(dst).parent, exist_ok=True)
