@@ -6,7 +6,6 @@ import numpy as np
 import time
 import os
 import sys
-from pathlib import Path
 
 def store_results(dst, algo, dataset, task, D, I, buildtime, querytime, params):
     os.makedirs(Path(dst).parent, exist_ok=True)
@@ -67,7 +66,7 @@ def run(task, verbose_level=1):
 
         ntrees = 400
         leaf_size = 10
-        hyper_params = [(ntrees, 172, 173, 300, 2)]
+        hyper_params = [(ntrees, 800, 801, 301, 2), (ntrees, 800, 801, 300, 2), (ntrees, 400, 401, 301, 2), (ntrees, 400, 401, 300, 2), (ntrees, 200, 201, 301, 2), (ntrees, 200, 201, 300, 2), (ntrees, 172, 173, 301, 2), (ntrees, 172, 173, 300, 2)]
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
@@ -84,7 +83,7 @@ def run(task, verbose_level=1):
 
         ntrees = 340
         leaf_size = 10
-        hyper_params = [(ntrees, 6, 7, 60, 0)]
+        hyper_params = [(ntrees, 12, 13, 61, 0), (ntrees, 12, 13, 60, 0), (ntrees, 10, 11, 61, 0), (ntrees, 10, 11, 60, 0), (ntrees, 8, 9, 61, 0), (ntrees, 8, 9, 60, 0), (ntrees, 6, 7, 61, 0), (ntrees, 6, 7, 60, 0)]
 
     # Create index
     print("Creating index...")

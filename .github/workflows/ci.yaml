@@ -66,17 +66,17 @@ jobs:
       - name: Make
         run: make
       - name: Check space before download
-        run: df -h
+        run: df
       - name: Download Task1
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-pubmed23.h5?download=true" -o data/benchmark-dev-pubmed23.h5
       - name: Check space after download
-        run: df -h
+        run: df
       - name: Run Task1
         run: python3 sisap2025.py task1wf
       - name: Check space after solutions
-        run: df -h
+        run: df
 
   task2:
     name: Task 2
@@ -140,18 +140,18 @@ jobs:
       - name: Make
         run: make
       - name: Check space before download
-        run: df -h
+        run: df
       - name: Download Task2
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-gooaq.h5?download=true" -o data/benchmark-dev-gooaq.h5
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/allknn-benchmark-dev-gooaq.h5?download=true" -o data/allknn-benchmark-dev-gooaq.h5
       - name: Check space after download
-        run: df -h
+        run: df
       - name: Run Task2
         run: python3 sisap2025.py task2
       - name: Check space after solutions
-        run: df -h
+        run: df
 
   task1faiss:
     name: Task 1 FAISS
@@ -209,21 +209,21 @@ jobs:
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
         run: df -h
-      - name: Install h5py
+      - name: Install Environments
         run: |
-          python3 -m pip install h5py
+          python3 -m pip install h5py faiss-cpu
       - name: Check space before download
-        run: df -h
+        run: df
       - name: Download Task1
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-pubmed23.h5?download=true" -o data/benchmark-dev-pubmed23.h5
       - name: Check space after download
-        run: df -h
+        run: df
       - name: Run Task1
         run: python3 sisap2025faiss.py task1
       - name: Check space after solutions
-        run: df -h
+        run: df
 
   task2faiss:
     name: Task 2 FAISS
@@ -281,19 +281,19 @@ jobs:
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
         run: df -h
-      - name: Install h5py
+      - name: Install Environments
         run: |
-          python3 -m pip install h5py
+          python3 -m pip install h5py faiss-cpu
       - name: Check space before download
-        run: df -h
+        run: df
       - name: Download Task2
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-gooaq.h5?download=true" -o data/benchmark-dev-gooaq.h5
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/allknn-benchmark-dev-gooaq.h5?download=true" -o data/allknn-benchmark-dev-gooaq.h5
       - name: Check space after download
-        run: df -h
+        run: df
       - name: Run Task2
         run: python3 sisap2025faiss.py task2
       - name: Check space after solutions
-        run: df -h
+        run: df
