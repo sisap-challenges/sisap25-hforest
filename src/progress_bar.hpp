@@ -185,11 +185,14 @@ public:
     
     // Process on completion
     void complete() {
+        bool was_already_complete = (current >= total);
         current = total;
         
-        // Display only if not verbose_level=0 (silent mode)
+        // Display only if not verbose_level=0 (silent mode) and not already displayed as complete
         if (verbose_level > 0) {
-            display();
+            if (!was_already_complete) {
+                display();
+            }
             std::cerr << std::endl;  // Add newline
         }
         
