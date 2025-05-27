@@ -1,38 +1,50 @@
+// Standard library headers
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <vector>
+
+// System headers (POSIX/Linux)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+// Third-party library headers
+#include <immintrin.h>
+#include <omp.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <string>
-#include <vector>
-#include <memory>
-#include <algorithm>
-#include <random>
-#include <cmath>
-#include <iostream>
-#include <H5Cpp.h>
-#include <omp.h>
-#include <immintrin.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/types.h>
 
 namespace py = pybind11;
 
 #include "assert.hpp"
 #include "fast_vector.hpp"
+#include "utils.hpp"
 
 using Candidate = std::tuple<int, int>;
 using Candidates = fast_vector<Candidate>;
 
+#include "timing.hpp"
+#include "progress_bar.hpp"
+#include "forest_utils.hpp"
 #include "htree.hpp"
 #include "hsort.hpp"
-#include "hsearch.hpp"
-#include "timing.hpp"
 #include "tree_encoder.hpp"
-#include "forest_utils.hpp"
-#include "progress_bar.hpp"
-#include "utils.hpp"
+#include "hsearch.hpp"
 
 // Bidirectional mapping between original IDs and pre-Hilbert sorted indices
 struct IDMapping {
@@ -46,14 +58,14 @@ private:
     int bitDepth = 8;          // 8 bits = 0-255 range
     int ntrees_total;          // Total number of trees built during training
     int ntrees;                // Number of trees to use during search (can be <= ntrees_total)
-    int odd_candidates = 11;   // Number of candidates for odd-level nodes
-    int even_candidates = 10;  // Number of candidates for even-level nodes
+    int odd_candidates = 11;   // Number of candidates for leaf nodes with odd size
+    int even_candidates = 10;  // Number of candidates for leaf nodes with even size
     int dist_candidates = 100; // Number of candidate points for distance calculation
     int hops = 1;              // Search range for neighboring points (pre_idx ±hops)
     int leaf_size = 1;         // Stop splitting when node size falls below this
     bool is_trained = false;
     int verbose = 1;           // 0=silent, 1=normal, 2=verbose
-    float rate = 500.0f;       // Quantization rate
+    float quantization_rate = 500.0f;       // Quantization rate
     
     // Quantized data storage (in pre-Hilbert sort order)
     uint8_t* points_data = nullptr;
@@ -138,8 +150,8 @@ public:
         
         if (dimensions == -1) {
             dimensions = data_dimensions;
-            // Calculate rate once when dimensions are set
-            rate = sqrt(sqrt(dimensions)) * 128.0f;
+            // Calculate quantization_rate once when dimensions are set
+            quantization_rate = sqrt(sqrt(dimensions)) * 128.0f;
         } else {
             assert(data_dimensions == dimensions && "Data dimensions do not match previously set dimensions");
         }
@@ -211,7 +223,7 @@ public:
                             uint8_t* point_ptr = temp_points_data + size_t(original_idx) * dimensions;
                             
                             // Transform and add to point cloud (ID is stored externally)
-                            ForestUtils::transform_point(ptr + i * dimensions, point_ptr, dimensions, rate);
+                            ForestUtils::transform_point(ptr + i * dimensions, point_ptr, dimensions, quantization_rate);
                             
                             // Add index to thread-specific buffer
                             thread_points[thread_id].push_back(original_idx);
@@ -487,7 +499,7 @@ public:
         std::vector<uint8_t> quantized_queries;
         {
             ProgressBar progress_bar(1, "Quantizing query points", verbose);
-            quantized_queries = ForestUtils::quantize_queries_batch(queries, dimensions, rate, timing);
+            quantized_queries = ForestUtils::quantize_queries_batch(queries, dimensions, quantization_rate, timing);
             progress_bar.complete();
         }
         
@@ -668,7 +680,7 @@ public:
                             const int index = leafValue >> 1;
                             const bool flag = leafValue & 1;
                             
-                            // Determine number of candidates (odd if odd flag, even if even flag)
+                            // Determine number of candidates based on leaf node size parity
                             const int candidates = flag ? odd_candidates : even_candidates;
                             assert(candidates > 0);
                             

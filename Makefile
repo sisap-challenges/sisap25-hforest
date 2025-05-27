@@ -1,7 +1,5 @@
 CXX = g++
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -march=native -fopenmp
-HDF5_CFLAGS = -I/usr/include/hdf5/serial
-HDF5_LIBS = -L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5 -lhdf5_cpp
 
 # Build dependencies
 PYBIND11_INCLUDES = $(shell python3 -m pybind11 --includes)

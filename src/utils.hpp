@@ -1,11 +1,6 @@
 #ifndef UTILS_HPP
 #define UTILS_HPP
 
-#include <cstdint>
-#include <vector>
-#include <stdexcept>
-#include "assert.hpp"
-
 // Class for bit-wise write operations
 class BitWriter {
 private:

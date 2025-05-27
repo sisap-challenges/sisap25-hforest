@@ -1,19 +1,6 @@
 #ifndef TREE_ENCODER_HPP
 #define TREE_ENCODER_HPP
 
-#include <vector>
-#include <cstdint>
-#include <iostream>
-#include <iomanip>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-#include "htree.hpp"
-#include "hsort.hpp"
-#include "utils.hpp"
-#include "assert.hpp"
 
 // Class to convert HilbertSort tree structure to packed binary data
 class TreeEncoder {

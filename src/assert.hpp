@@ -6,7 +6,6 @@
 #endif
 #ifndef ASSERT_HPP
 #define ASSERT_HPP
-#include <sstream>
 
 void my_assert_fail(const char * cond, const char * file, unsigned int line, const char *func) {
     std::stringstream ss;

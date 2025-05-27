@@ -7,10 +7,6 @@ import os
 import pybind11
 PYBIND11_INCLUDE = pybind11.get_include()
 
-# Find HDF5 include and lib directories
-HDF5_INCLUDE_DIR = "/usr/include/hdf5/serial"  # Modify if needed
-HDF5_LIB_DIR = "/usr/lib/x86_64-linux-gnu/hdf5/serial"  # Modify if needed
-
 # Collect source files
 source_files = ['src/hforest.cpp']
 
@@ -21,11 +17,9 @@ ext_modules = [
         source_files,
         include_dirs=[
             'src',  # Add src directory to include path
-            PYBIND11_INCLUDE,
-            HDF5_INCLUDE_DIR
+            PYBIND11_INCLUDE
         ],
-        library_dirs=[HDF5_LIB_DIR],
-        libraries=['hdf5', 'hdf5_cpp', 'gomp'],
+        libraries=['gomp'],
         language='c++'
     ),
 ]

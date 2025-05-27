@@ -1,9 +1,6 @@
 #ifndef HSEARCH_HPP
 #define HSEARCH_HPP
 
-#include "htree.hpp"
-#include <vector>
-#include <algorithm>
 
 class HilbertTreeSearch {
 public:

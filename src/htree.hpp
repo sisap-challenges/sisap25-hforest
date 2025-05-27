@@ -1,11 +1,6 @@
 #ifndef HTREE_HPP
 #define HTREE_HPP
 
-#include <cstdint>
-#include <vector>
-#include <stdexcept>
-#include <string>
-#include "utils.hpp"
 
 // File-mapped HilbertTree structure
 // Placed directly on mmap'ed memory, with data following the structure

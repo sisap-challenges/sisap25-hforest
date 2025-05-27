@@ -1,13 +1,6 @@
 #ifndef PROGRESS_BAR_HPP
 #define PROGRESS_BAR_HPP
 
-#include <iostream>
-#include <string>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
-#include <cmath>
-#include <ctime>
 
 class ProgressBar {
 private:
