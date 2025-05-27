@@ -60,9 +60,9 @@ jobs:
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
         run: df -h
-      - name: Install h5py
+      - name: Install Environments
         run: |
-          python3 -m pip install h5py
+          python3 -m pip install h5py pybind11
       - name: Make
         run: make
       - name: Check space before download
@@ -134,9 +134,9 @@ jobs:
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
         run: df -h
-      - name: Install h5py
+      - name: Install Environments
         run: |
-          python3 -m pip install h5py
+          python3 -m pip install h5py pybind11
       - name: Make
         run: make
       - name: Check space before download
@@ -212,8 +212,6 @@ jobs:
       - name: Install h5py
         run: |
           python3 -m pip install h5py
-      - name: Make
-        run: make
       - name: Check space before download
         run: df -h
       - name: Download Task1
@@ -286,8 +284,6 @@ jobs:
       - name: Install h5py
         run: |
           python3 -m pip install h5py
-      - name: Make
-        run: make
       - name: Check space before download
         run: df -h
       - name: Download Task2
