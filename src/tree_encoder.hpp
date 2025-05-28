@@ -162,13 +162,13 @@ public:
         }
         
         // Open file
-        int fd = open(filePath.c_str(), O_RDWR);
+        int fd = open(filePath.c_str(), O_RDONLY);
         if (fd == -1) {
             return nullptr;  // Failed to open file
         }
         
         // Memory map the file
-        void* mmapAddr = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        void* mmapAddr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
         close(fd);
         
         if (mmapAddr == MAP_FAILED) {
