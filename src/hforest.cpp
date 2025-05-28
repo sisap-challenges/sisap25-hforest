@@ -41,6 +41,7 @@ using Candidates = fast_vector<Candidate>;
 #include "timing.hpp"
 #include "progress_bar.hpp"
 #include "forest_utils.hpp"
+#include "bit_quantize.hpp"
 #include "htree.hpp"
 #include "hsort.hpp"
 #include "tree_encoder.hpp"
@@ -55,7 +56,7 @@ struct IDMapping {
 class HilbertForest {
 private:
     int dimensions = -1;
-    int bitDepth = 8;          // 8 bits = 0-255 range
+    int bitDepth = 4;          // Bit depth for quantization (e.g., 3 for 3-bit, 8 for 8-bit)
     int ntrees_total;          // Total number of trees built during training
     int ntrees;                // Number of trees to use during search (can be <= ntrees_total)
     int odd_candidates = 11;   // Number of candidates for leaf nodes with odd size
@@ -66,9 +67,11 @@ private:
     bool is_trained = false;
     int verbose = 1;           // 0=silent, 1=normal, 2=verbose
     float quantization_rate = 500.0f;       // Quantization rate
+    int laneCount;             // Number of values that can be read at once (57 / bitDepth)
     
     // Quantized data storage (in pre-Hilbert sort order)
     uint8_t* points_data = nullptr;
+    void* points_memory = nullptr;
     int num_points = 0;
     
     // Sketch data storage (in pre-Hilbert sort order)
@@ -101,8 +104,9 @@ private:
         }
         trees.clear();
         
-        if (points_data != nullptr) {
-            delete[] points_data;
+        if (points_memory != nullptr) {
+            free(points_memory);
+            points_memory = nullptr;
             points_data = nullptr;
             num_points = 0;
         }
@@ -124,11 +128,14 @@ private:
     }
     
 public:
-    HilbertForest(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1)
-        : ntrees_total(ntrees), ntrees(ntrees), leaf_size(leaf_size),
+    HilbertForest(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 4)
+        : bitDepth(bit_depth), ntrees_total(ntrees), ntrees(ntrees), leaf_size(leaf_size),
           verbose(verbose_level), timing(), dbPath(db_path) {
         assert(leaf_size > 0);
         assert(verbose_level >= 0 && verbose_level <= 2);
+        assert(bit_depth > 0 && bit_depth <= 32);
+        // Calculate how many values can be read at once
+        laneCount = 57 / bit_depth;
         if (seed == -1) {
             rng = std::mt19937(std::random_device{}());
         } else {
@@ -151,7 +158,9 @@ public:
         if (dimensions == -1) {
             dimensions = data_dimensions;
             // Calculate quantization_rate once when dimensions are set
-            quantization_rate = sqrt(sqrt(dimensions)) * 128.0f;
+            // For bitDepth bits, the midpoint is 2^(bitDepth-1)
+            float midpoint = (float)(1LL << (bitDepth - 1));
+            quantization_rate = sqrt(sqrt(dimensions)) * midpoint;
         } else {
             assert(data_dimensions == dimensions && "Data dimensions do not match previously set dimensions");
         }
@@ -164,9 +173,9 @@ public:
 
         this->num_points = num_points;
         
-        // Prepare temporary buffer for quantization (before ID sorting)
-        size_t temp_data_size = size_t(dimensions) * num_points;
-        uint8_t* temp_points_data = new uint8_t[temp_data_size];
+        // Prepare BitWriter for all data
+        BitWriter dataWriter;
+        
         
         id_mapping.id_to_preidx.resize(num_points);
         id_mapping.preidx_to_id.resize(num_points);
@@ -202,38 +211,12 @@ public:
                     // Process each data point
                     ScopedTimer timer3(point_transform_time);
                     
-                    int num_threads = std::min(omp_get_max_threads(), 4);
+                    // Transform batch to bit-packed format
+                    BitQuantizer::transformToBits(ptr, dataWriter, current_batch, dimensions, quantization_rate, bitDepth);
                     
-                    // Prepare local buffers for each thread
-                    std::vector<std::vector<int>> thread_points(num_threads);
-                    for (int t = 0; t < num_threads; t++) {
-                        thread_points[t].reserve(current_batch / num_threads + 1);
-                    }
-                    
-                    // Parallel processing with OpenMP
-                    #pragma omp parallel num_threads(num_threads)
-                    {
-                        int thread_id = omp_get_thread_num();
-                        
-                        #pragma omp for
-                        for (int i = 0; i < current_batch; i++) {
-                            int original_idx = start_idx + i;
-                            
-                            // Calculate pointer to the point in temporary buffer (using 64-bit integer calculation)
-                            uint8_t* point_ptr = temp_points_data + size_t(original_idx) * dimensions;
-                            
-                            // Transform and add to point cloud (ID is stored externally)
-                            ForestUtils::transform_point(ptr + i * dimensions, point_ptr, dimensions, quantization_rate);
-                            
-                            // Add index to thread-specific buffer
-                            thread_points[thread_id].push_back(original_idx);
-                        }
-                    }
-                    
-                    // Merge local buffers from each thread
-                    for (int t = 0; t < num_threads; t++) {
-                        all_points.insert(all_points.end(), thread_points[t].begin(), thread_points[t].end());
-                        thread_points[t].clear();
+                    // Add indices for all points in batch
+                    for (int i = 0; i < current_batch; i++) {
+                        all_points.push_back(start_idx + i);
                     }
                 }
                 
@@ -250,6 +233,15 @@ public:
             }
         }
         
+        // Finalize bit-packed data
+        dataWriter.finalizeBuffer();
+        
+        // Create temporary buffer for bit-packed data
+        size_t temp_data_size = dataWriter.size();
+        uint8_t* temp_points_data = (uint8_t*)malloc(temp_data_size);
+        assert(temp_points_data != nullptr && "Failed to allocate memory for temporary points data");
+        std::memcpy(temp_points_data, dataWriter.data(), temp_data_size);
+        
         // Pre-Hilbert sort
         {
             ProgressBar progress_bar(1, "Pre-Hilbert sort", verbose);
@@ -257,7 +249,7 @@ public:
             for (int i = 0; i < dimensions; i++) {
                 pre_hilbert_axes[i] = i;
             }
-            HilbertSort pre_sorter(pre_hilbert_axes, bitDepth, rng, temp_points_data, dimensions, 1);
+            HilbertSort pre_sorter(pre_hilbert_axes, bitDepth, rng, temp_points_data, dimensions, 1, laneCount);
             pre_sorter.sort(all_points);
             progress_bar.complete();
         }
@@ -270,21 +262,30 @@ public:
         }
         
         // Create new memory layout based on pre-Hilbert sort order
-        size_t point_size = size_t(dimensions);
-        size_t total_size = point_size * num_points;
-        points_data = new uint8_t[total_size];
+        // For bit-packed data, we need to reorder the data
+        BitWriter sortedDataWriter;
         
-        // Place points in PRE_IDX order
+        // Process points in PRE_IDX order
         for (int pre_idx = 0; pre_idx < num_points; pre_idx++) {
             int original_id = id_mapping.preidx_to_id[pre_idx];
-            uint8_t* src_ptr = temp_points_data + size_t(original_id) * dimensions;
-            uint8_t* dst_ptr = points_data + size_t(pre_idx) * dimensions;
             
-            std::memcpy(dst_ptr, src_ptr, dimensions);
+            // Copy bit-packed data for this point
+            for (int d = 0; d < dimensions; d++) {
+                size_t bitPos = BitQuantizer::calculateBitPosition(original_id, d, dimensions, bitDepth);
+                uint64_t value = readBits(temp_points_data, bitPos, bitDepth);
+                sortedDataWriter.writeBits(value, bitDepth);
+            }
         }
         
+        // Finalize sorted data
+        sortedDataWriter.finalizeBuffer();
+        size_t sorted_data_size = sortedDataWriter.size();
+        points_data = (uint8_t*)malloc(sorted_data_size);
+        assert(points_data != nullptr && "Failed to allocate memory for points data");
+        std::memcpy(points_data, sortedDataWriter.data(), sorted_data_size);
+        
         // Release temporary buffer
-        delete[] temp_points_data;
+        free(temp_points_data);
         
         // Generate sketches from quantized data (stored in PRE_IDX order)
         {
@@ -295,9 +296,17 @@ public:
 
             // Generate sketches for entire dataset
             size_t sketch_qword_bytes = (size_t((dimensions + 7) >> 3) + 7) & ~7;
-            sketches_memory = malloc(sketch_qword_bytes * num_points + 8);
+            // Add extra 8 bytes at the end for safe batch reading with readBits
+            sketches_memory = malloc(sketch_qword_bytes * num_points + 16);
+            assert(sketches_memory != nullptr && "Failed to allocate memory for sketches");
             sketches_data = (uint8_t*)(void*)(((size_t)sketches_memory + 7) & ~7);
-            ForestUtils::generate_sketches_batch(points_data, num_points, dimensions, sketches_data, timing);
+            
+            // Generate sketches from bit-packed data
+            #pragma omp parallel for
+            for (int i = 0; i < num_points; i++) {
+                uint8_t* sketch_ptr = sketches_data + (size_t)i * sketch_qword_bytes;
+                BitQuantizer::generateSketchFromBitPacked(points_data, sketch_ptr, i, dimensions, bitDepth, sketch_qword_bytes);
+            }
 
             progress_bar.complete();
         }
@@ -362,7 +371,7 @@ public:
                 //shuffled_axes.resize(dimensions - int(dimensions * 0.1));
 
                 // Split nodes with configured minimum leaf size
-                HilbertSort sorter(shuffled_axes, bitDepth, rng, points_data, dimensions, leaf_size);
+                HilbertSort sorter(shuffled_axes, bitDepth, rng, points_data, dimensions, leaf_size, laneCount);
                 int rootNodeId __attribute__((unused)) = sorter.sort(sorted_points);
                 assert(rootNodeId == 0);
 
@@ -410,6 +419,26 @@ public:
             // Display statistics (after progress bar completion)
             double avg_node_count = double(total_node_count) / ntrees_total;
             std::cerr << "  Average node count: " << avg_node_count << std::endl;
+        }
+        
+        // Compress database points to save memory (bitDepth -> bitDepth-1)
+        // MSB information is stored in sketches
+        {
+            ProgressBar progress_bar(1, "Compressing database points", verbose);
+            
+            BitWriter compressedWriter;
+            BitQuantizer::compressBitPackedData(points_data, compressedWriter, num_points, dimensions, bitDepth);
+            compressedWriter.finalizeBuffer();
+            
+            // Replace original points_data with compressed version
+            free(points_memory);
+            size_t compressed_size = compressedWriter.size();
+            points_memory = malloc(compressed_size + 8);
+            assert(points_memory != nullptr && "Failed to allocate memory for compressed points");
+            points_data = (uint8_t*)(void*)(((size_t)points_memory + 7) & ~7);
+            std::memcpy(points_data, compressedWriter.data(), compressed_size);
+            
+            progress_bar.complete();
         }
     }
     
@@ -496,21 +525,24 @@ public:
         std::vector<int> filtered_candidates_per_query(num_queries, 0);
         
         // Quantize all queries once in advance
-        std::vector<uint8_t> quantized_queries;
+        BitWriter queryWriter;
         {
             ProgressBar progress_bar(1, "Quantizing query points", verbose);
-            quantized_queries = ForestUtils::quantize_queries_batch(queries, dimensions, quantization_rate, timing);
+            
+            py::buffer_info buf = queries.request();
+            float* query_ptr = (float*)buf.ptr;
+            
+            BitQuantizer::transformToBits(query_ptr, queryWriter, num_queries, dimensions, quantization_rate, bitDepth);
+            queryWriter.finalizeBuffer();
+            
             progress_bar.complete();
         }
         
-        // Prepare pre-quantized queries according to axis mapping
-        std::vector<uint8_t> prepared_queries;
-        {
-            ProgressBar progress_bar(1, "Encoding queries", verbose);
-            prepared_queries = ForestUtils::prepare_queries_batch(
-                quantized_queries, num_queries, dimensions, timing);
-            progress_bar.complete();
-        }
+        // Create buffer for quantized queries
+        size_t query_data_size = queryWriter.size();
+        uint8_t* quantized_queries = (uint8_t*)malloc(query_data_size);
+        assert(quantized_queries != nullptr && "Failed to allocate memory for quantized queries");
+        std::memcpy(quantized_queries, queryWriter.data(), query_data_size);
             
         int num_threads = omp_get_max_threads();
         if (verbose) std::cerr << "OpenMP threads: " << num_threads << std::endl;
@@ -522,6 +554,7 @@ public:
         size_t tree_mem_size = sizeof(int) * num_queries;
         size_t tree_mem_qword_size = (tree_mem_size + block_mask) & ~block_mask;
         uint8_t* tree_mem_memory = (uint8_t*)malloc(tree_mem_qword_size * used_trees + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
+        assert(tree_mem_memory != nullptr && "Failed to allocate memory for tree processing");
         uint8_t* tree_mem_base = (uint8_t*)((size_t(tree_mem_memory) + block_mask) & ~block_mask);
 
         // Create progress bar for tree processing
@@ -539,10 +572,11 @@ public:
 
             work_size2 = (work_size2 + block_mask) & ~block_mask;
             uint8_t * work_memory = (uint8_t *)malloc(work_size2 * num_threads + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
+            assert(work_memory != nullptr && "Failed to allocate memory for thread work");
             uint8_t * whole_base = (uint8_t *)((size_t(work_memory) + block_mask) & ~block_mask);
             
             // Query data is read-only so can be shared
-            uint8_t * queries = prepared_queries.data();
+            uint8_t * queries = quantized_queries;
             
             // Parallel processing with OpenMP
             #pragma omp parallel num_threads(num_threads)
@@ -568,7 +602,7 @@ public:
                     // Search all at once using HilbertTreeSearch
                     HilbertTreeSearch searcher(trees[t].tree);
                     // Calculate query bit count
-                    int totalQueryBits = dimensions * 8;
+                    int totalQueryBits = dimensions * bitDepth;
                     searcher.search(queries, num_queries, totalQueryBits, results, query_indices);
                     
                     // Update per-tree progress
@@ -621,6 +655,7 @@ public:
 
             work_size = (work_size + block_mask) & ~block_mask;
             uint8_t * work_memory = (uint8_t *)malloc(work_size * num_threads + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
+            assert(work_memory != nullptr && "Failed to allocate memory for query processing");
             uint8_t * whole_base = (uint8_t *)((size_t(work_memory) + block_mask) & ~block_mask);
             
             // Parallel processing with OpenMP
@@ -652,15 +687,10 @@ public:
                     scores.clear();
                     filtered.clear();
                 
-                    const uint8_t* q_ptr;
                     // Generate sketch from query
                     {
                         ScopedTimer timer(timing.search_sketch);
-                        const size_t query_offset = dimensions * q;
-                        const size_t end_offset __attribute__((unused)) = query_offset + dimensions;
-                        assert(end_offset <= quantized_queries.size() && "Out of bounds access to quantized_queries");
-                        q_ptr = quantized_queries.data() + query_offset;
-                        ForestUtils::generate_sketch_from_quantized(q_ptr, query_sketch, dimensions, sketch_qword_bytes);
+                        BitQuantizer::generateSketchFromBitPacked(quantized_queries, query_sketch, q, dimensions, bitDepth, sketch_qword_bytes);
                     }
                     // Get pointer to quantized query
                     {
@@ -762,16 +792,14 @@ public:
                             
                             // Calculate distance for all points in group
                             for (int pre_idx = begin; pre_idx < end; ++pre_idx) {
+                                // Get sketch for this point
+                                size_t sketch_stride = (size_t((dimensions + 7) >> 3) + 7) & ~7;
+                                uint8_t* point_sketch = sketches_data + (size_t)pre_idx * sketch_stride;
                                 
-                                // Use quantized data directly (in PRE_IDX order)
-                                uint8_t* point_ptr = points_data + size_t(dimensions) * pre_idx;
-                            
-                                // Calculate squared Euclidean distance
-                                int distance2 = 0;
-                                for (int d = 0; d < dimensions; d++) {
-                                    int diff = (int)q_ptr[d] - (int)point_ptr[d];
-                                    distance2 += diff * diff;
-                                }
+                                // Calculate squared distance using compressed data + sketch
+                                int distance2 = BitQuantizer::calculateSquaredDistanceCompressed(
+                                    points_data, pre_idx, point_sketch, sketch_stride,
+                                    quantized_queries, q, dimensions, bitDepth, laneCount);
                                 
                                 // Use squared Euclidean distance as score (smaller is better)
                                 filtered.emplace_back(distance2, pre_idx);
@@ -849,6 +877,7 @@ public:
         }
         
         free(tree_mem_memory);
+        free(quantized_queries);
         
         return std::make_tuple(D, I);
     }
@@ -892,20 +921,21 @@ public:
 };
 
 // Create index
-HilbertForest create_index(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1) {
-    return HilbertForest(db_path, ntrees, leaf_size, verbose_level, seed);
+HilbertForest create_index(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 4) {
+    return HilbertForest(db_path, ntrees, leaf_size, verbose_level, seed, bit_depth);
 }
 
 PYBIND11_MODULE(hforest, m) {
     m.doc() = "Hilbert Forest: A spatial indexing library using Hilbert curves"; 
     
     py::class_<HilbertForest>(m, "HilbertForest")
-        .def(py::init<const std::string&, int, int, int, int>(),
+        .def(py::init<const std::string&, int, int, int, int, int>(),
              py::arg("db_path") = "db",
              py::arg("ntrees") = 10,
              py::arg("leaf_size") = 1,
              py::arg("verbose") = 1,
-             py::arg("seed") = -1)
+             py::arg("seed") = -1,
+             py::arg("bit_depth") = 4)
         .def("preload", &HilbertForest::preload, 
              py::arg("data"),
              "Preload dataset and perform quantization and pre-Hilbert sorting")
@@ -945,5 +975,6 @@ PYBIND11_MODULE(hforest, m) {
           py::arg("leaf_size") = 1,
           py::arg("verbose") = false,
           py::arg("seed") = -1,
+          py::arg("bit_depth") = 4,
           "Create new HilbertForest index");
 }

@@ -1,6 +1,8 @@
 #ifndef HSORT_HPP
 #define HSORT_HPP
 
+#include "bit_quantize.hpp"
+
 
 class HilbertSort {
 private:
@@ -19,11 +21,7 @@ private:
     std::mt19937& rng;
     uint8_t* base_ptr;         // Base pointer to quantized data array
     size_t data_dim;           // Number of dimensions (for pointer arithmetic)
-    
-    // Helper function to get actual data pointer from index
-    inline uint8_t* getPointPtr(int index) const {
-        return base_ptr + data_dim * index;
-    }
+    int laneCount;             // Number of values that can be read at once
     
     // Partition processing for index array
     int partition_compact(std::vector<int>& A, int st, int en, int currentAxis) {
@@ -39,8 +37,13 @@ private:
         int j = en + 1;
 
         while (true) {
-            do { i++; } while(i < j && ((getPointPtr(A[i])[physicalAxis] & currentBit) == di));
-            do { j--; } while(i < j && ((getPointPtr(A[j])[physicalAxis] & currentBit) != di));
+            do { 
+                i++; 
+            } while(i < j && (BitQuantizer::readAxisBit(base_ptr, A[i], physicalAxis, currentBitPosition, data_dim, bitDepth) == (di != 0)));
+            
+            do { 
+                j--; 
+            } while(i < j && (BitQuantizer::readAxisBit(base_ptr, A[j], physicalAxis, currentBitPosition, data_dim, bitDepth) != (di != 0)));
 
             if (i >= j) return i;
 
@@ -52,24 +55,44 @@ private:
     bool areAllPointsIdentical(const std::vector<int>& A, int start, int end) {
         if (start >= end) return true;
         
-        const unsigned char* firstCoords = getPointPtr(A[start]);
-        for (int i = start + 1; i <= end; i++) {
-            const unsigned char* currentCoords = getPointPtr(A[i]);
-            for (int d = 0; d < dim; d++) {
-                if (firstCoords[d] != currentCoords[d]) {
+        // TODO: This implementation assumes logical dimensions == physical dimensions
+        // When they differ, a separate implementation is needed to avoid unnecessary comparisons
+        assert(dim == (int)data_dim && "Current implementation requires logical dimensions == physical dimensions");
+        
+        // Compare all dimensions of all points using bit-packed data
+        size_t d = 0;
+        while (d < data_dim) {
+            // Determine how many values to read in this batch
+            int batchSize = std::min(laneCount, (int)(data_dim - d));
+            int batchBits = batchSize * bitDepth;
+            
+            // Read batch from first point once
+            size_t bitPos1 = BitQuantizer::calculateBitPosition(A[start], d, data_dim, bitDepth);
+            uint64_t batch1 = readBits(base_ptr, bitPos1, batchBits);
+            
+            // Compare with all other points
+            for (int i = start + 1; i <= end; i++) {
+                // Read batch from current point
+                size_t bitPos2 = BitQuantizer::calculateBitPosition(A[i], d, data_dim, bitDepth);
+                uint64_t batch2 = readBits(base_ptr, bitPos2, batchBits);
+                
+                // Compare entire batch at once
+                if (batch1 != batch2) {
                     return false;
                 }
             }
+            
+            d += batchSize;
         }
         return true;
     }
     
 
 public:
-    HilbertSort(const std::vector<int>& axes, int bitDepth, std::mt19937& rng, uint8_t* base_ptr, size_t data_dim, int leafSizeValue = 1)
+    HilbertSort(const std::vector<int>& axes, int bitDepth, std::mt19937& rng, uint8_t* base_ptr, size_t data_dim, int leafSizeValue = 1, int laneCount = 1)
         : dim(axes.size()), bitDepth(bitDepth), currentBit(1U << (bitDepth - 1)),
           currentBitPosition(bitDepth - 1), bits(axes.size(), false), baseAxis(0), nextNodeId(0),
-          leaf_size(leafSizeValue), axes(axes), rng(rng), base_ptr(base_ptr), data_dim(data_dim) {
+          leaf_size(leafSizeValue), axes(axes), rng(rng), base_ptr(base_ptr), data_dim(data_dim), laneCount(laneCount) {
         assert(dim > 0);
         assert(bitDepth > 0);
         assert(leaf_size > 0);
