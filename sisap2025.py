@@ -67,7 +67,16 @@ def run(task, verbose_level=1):
 
         ntrees = 400
         leaf_size = 10
-        hyper_params = [(ntrees, 800, 801, 301, 2), (ntrees, 800, 801, 300, 2), (ntrees, 400, 401, 301, 2), (ntrees, 400, 401, 300, 2), (ntrees, 200, 201, 301, 2), (ntrees, 200, 201, 300, 2), (ntrees, 172, 173, 301, 2), (ntrees, 172, 173, 300, 2)]
+        hyper_params = [
+            (ntrees, 400, 401, 301, 2),
+            (ntrees, 400, 401, 300, 2),
+            (ntrees, 240, 241, 301, 2),
+            (ntrees, 240, 241, 300, 2),
+            (200, 840, 841, 301, 2),
+            (200, 840, 841, 300, 2),
+            (100, 3000, 3001, 301, 2),
+            (100, 3000, 3001, 300, 2),
+        ]
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
@@ -84,7 +93,16 @@ def run(task, verbose_level=1):
 
         ntrees = 340
         leaf_size = 10
-        hyper_params = [(ntrees, 12, 13, 61, 0), (ntrees, 12, 13, 60, 0), (ntrees, 10, 11, 61, 0), (ntrees, 10, 11, 60, 0), (ntrees, 8, 9, 61, 0), (ntrees, 8, 9, 60, 0), (ntrees, 6, 7, 61, 0), (ntrees, 6, 7, 60, 0)]
+        hyper_params = [
+            (ntrees, 12, 13, 61, 0),
+            (ntrees, 12, 13, 60, 0),
+            (ntrees, 10, 11, 61, 0),
+            (ntrees, 10, 11, 60, 0),
+            (ntrees, 8, 9, 61, 0),
+            (ntrees, 8, 9, 60, 0),
+            (ntrees, 6, 7, 61, 0),
+            (ntrees, 6, 7, 60, 0)
+        ]
 
     # Create index
     print("Creating index...")
@@ -120,7 +138,7 @@ def run(task, verbose_level=1):
     
     # Accept user input in interactive mode
     if sys.stdin.isatty():
-        hyper_params = gen_hyper_params(ntrees, hyper_params[0])
+        hyper_params = gen_hyper_params(ntrees, hyper_params[-1])
     for search_trees, even, odd, dist, hops in hyper_params:
         print(f"Starting search on {queries.shape} with ntrees={search_trees}")
         start = time.time()
