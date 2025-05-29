@@ -9,14 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Swap check before off
-        run: sudo swapon --show
-      - name: Swap off
-        run: sudo swapoff -a
-      - name: Swap check after off
-        run: sudo swapon --show
       - name: Check space before cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
         run: |
           sudo rm -rf "/opt/ghc" || true
@@ -25,7 +21,9 @@ jobs:
           sudo rm -rf "/usr/local/lib/android" || true
           sudo rm -rf "/usr/local/share/boost" || true
       - name: Check space checkupoint cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: apt-get remove cleanup
         run: |
           sudo apt purge -y \
@@ -65,38 +63,42 @@ jobs:
           sudo apt-get autoremove -y >/dev/null 2>&1 || true
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Install Environments
         run: |
           python3 -m pip install h5py pybind11
       - name: Make
         run: make
       - name: Check space before download
-        run: df
+        run: |
+          df
+          free
       - name: Download Task1
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-pubmed23.h5?download=true" -o data/benchmark-dev-pubmed23.h5
       - name: Check space after download
-        run: df
+        run: |
+          df
+          free
       - name: Run Task1
         run: python3 -u sisap2025.py task1wf
       - name: Check space after solutions
-        run: df
+        run: |
+          df
+          free
 
   task2:
     name: Task 2
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Swap check before off
-        run: sudo swapon --show
-      - name: Swap off
-        run: sudo swapoff -a
-      - name: Swap check after off
-        run: sudo swapon --show
       - name: Check space before cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
         run: |
           sudo rm -rf "/opt/ghc" || true
@@ -105,7 +107,9 @@ jobs:
           sudo rm -rf "/usr/local/lib/android" || true
           sudo rm -rf "/usr/local/share/boost" || true
       - name: Check space checkupoint cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: apt-get remove cleanup
         run: |
           sudo apt purge -y \
@@ -145,25 +149,33 @@ jobs:
           sudo apt-get autoremove -y >/dev/null 2>&1 || true
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Install Environments
         run: |
           python3 -m pip install h5py pybind11
       - name: Make
         run: make
       - name: Check space before download
-        run: df
+        run: |
+          df
+          free
       - name: Download Task2
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-gooaq.h5?download=true" -o data/benchmark-dev-gooaq.h5
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/allknn-benchmark-dev-gooaq.h5?download=true" -o data/allknn-benchmark-dev-gooaq.h5
       - name: Check space after download
-        run: df
+        run: |
+          df
+          free
       - name: Run Task2
         run: python3 -u sisap2025.py task2
       - name: Check space after solutions
-        run: df
+        run: |
+          df
+          free
 
   task1faiss:
     if: ${{ false }}
@@ -171,14 +183,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Swap check before off
-        run: sudo swapon --show
-      - name: Swap off
-        run: sudo swapoff -a
-      - name: Swap check after off
-        run: sudo swapon --show
       - name: Check space before cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
         run: |
           sudo rm -rf "/opt/ghc" || true
@@ -187,7 +195,9 @@ jobs:
           sudo rm -rf "/usr/local/lib/android" || true
           sudo rm -rf "/usr/local/share/boost" || true
       - name: Check space checkupoint cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: apt-get remove cleanup
         run: |
           sudo apt purge -y \
@@ -227,36 +237,40 @@ jobs:
           sudo apt-get autoremove -y >/dev/null 2>&1 || true
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Install Environments
         run: |
           python3 -m pip install h5py faiss-cpu
       - name: Check space before download
-        run: df
+        run: |
+          df
+          free
       - name: Download Task1
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-pubmed23.h5?download=true" -o data/benchmark-dev-pubmed23.h5
       - name: Check space after download
-        run: df
+        run: |
+          df
+          free
       - name: Run Task1
         run: python3 -u sisap2025faiss.py task1
       - name: Check space after solutions
-        run: df
+        run: |
+          df
+          free
 
   task2faiss:
     name: Task 2 FAISS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Swap check before off
-        run: sudo swapon --show
-      - name: Swap off
-        run: sudo swapoff -a
-      - name: Swap check after off
-        run: sudo swapon --show
       - name: Check space before cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
         run: |
           sudo rm -rf "/opt/ghc" || true
@@ -265,7 +279,9 @@ jobs:
           sudo rm -rf "/usr/local/lib/android" || true
           sudo rm -rf "/usr/local/share/boost" || true
       - name: Check space checkupoint cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: apt-get remove cleanup
         run: |
           sudo apt purge -y \
@@ -305,20 +321,28 @@ jobs:
           sudo apt-get autoremove -y >/dev/null 2>&1 || true
           sudo apt-get autoclean -y >/dev/null 2>&1 || true
       - name: Check space after cleanup
-        run: df -h
+        run: |
+          df -h
+          free
       - name: Install Environments
         run: |
           python3 -m pip install h5py faiss-cpu
       - name: Check space before download
-        run: df
+        run: |
+          df
+          free
       - name: Download Task2
         run: |
           mkdir data
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-gooaq.h5?download=true" -o data/benchmark-dev-gooaq.h5
           curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/allknn-benchmark-dev-gooaq.h5?download=true" -o data/allknn-benchmark-dev-gooaq.h5
       - name: Check space after download
-        run: df
+        run: |
+          df
+          free
       - name: Run Task2
         run: python3 -u sisap2025faiss.py task2
       - name: Check space after solutions
-        run: df
+        run: |
+          df
+          free
