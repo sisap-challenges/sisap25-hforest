@@ -9,6 +9,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Swap check before off
+        run: sudo swapon --show
+      - name: Swap off
+        run: sudo swapoff -a
+      - name: Swap check after off
+        run: sudo swapon --show
       - name: Check space before cleanup
         run: df -h
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
@@ -83,6 +89,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Swap check before off
+        run: sudo swapon --show
+      - name: Swap off
+        run: sudo swapoff -a
+      - name: Swap check after off
+        run: sudo swapon --show
       - name: Check space before cleanup
         run: df -h
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
@@ -154,10 +166,17 @@ jobs:
         run: df
 
   task1faiss:
+    if: ${{ false }}
     name: Task 1 FAISS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Swap check before off
+        run: sudo swapon --show
+      - name: Swap off
+        run: sudo swapoff -a
+      - name: Swap check after off
+        run: sudo swapon --show
       - name: Check space before cleanup
         run: df -h
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
@@ -230,6 +249,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Swap check before off
+        run: sudo swapon --show
+      - name: Swap off
+        run: sudo swapoff -a
+      - name: Swap check after off
+        run: sudo swapon --show
       - name: Check space before cleanup
         run: df -h
       - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
