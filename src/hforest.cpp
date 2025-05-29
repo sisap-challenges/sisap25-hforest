@@ -506,12 +506,12 @@ public:
         py::buffer_info buf = queries.request();
         assert(buf.ndim == 2 && buf.shape[1] == dimensions && "Query dimensions must match index dimensions");
         
-        int num_queries = buf.shape[0];
-        if(verbose) std::cerr << "Searching: queries=" << num_queries << ", k=" << k << std::endl;
+        int total_queries = buf.shape[0];
+        if(verbose) std::cerr << "Searching: queries=" << total_queries << ", k=" << k << std::endl;
 
         // Create result arrays
-        py::array_t<float> D(py::array::ShapeContainer({num_queries, k}));
-        py::array_t<int> I(py::array::ShapeContainer({num_queries, k}));
+        py::array_t<float> D(py::array::ShapeContainer({total_queries, k}));
+        py::array_t<int> I(py::array::ShapeContainer({total_queries, k}));
         
         auto d_ptr = D.mutable_unchecked<2>();
         auto i_ptr = I.mutable_unchecked<2>();
@@ -519,365 +519,366 @@ public:
         // Number of trees to actually use (smaller of ntrees and ntrees_total)
         int used_trees = std::min(ntrees, ntrees_total);
         
-        // Data structures for per-query processing
-        // Arrays to store overall statistics (maintain statistics even with per-query processing for memory efficiency)
-        std::vector<int> total_candidates_per_query(num_queries, 0);
-        std::vector<int> filtered_candidates_per_query(num_queries, 0);
+        // Batch processing
+        const int batch_size = 12032;
+        const int max_batch_queries = std::min(batch_size, total_queries);
         
-        // Quantize all queries once in advance
-        BitWriter queryWriter;
-        {
-            ProgressBar progress_bar(1, "Quantizing query points", verbose);
-            
-            py::buffer_info buf = queries.request();
-            float* query_ptr = (float*)buf.ptr;
-            
-            BitQuantizer::transformToBits(query_ptr, queryWriter, num_queries, dimensions, quantization_rate, bitDepth);
-            queryWriter.finalizeBuffer();
-            
-            progress_bar.complete();
-        }
-        
-        // Create buffer for quantized queries
-        size_t query_data_size = queryWriter.size();
-        uint8_t* quantized_queries = (uint8_t*)malloc(query_data_size);
-        assert(quantized_queries != nullptr && "Failed to allocate memory for quantized queries");
-        std::memcpy(quantized_queries, queryWriter.data(), query_data_size);
-            
+        // Pre-allocate memory for largest batch
         int num_threads = omp_get_max_threads();
         if (verbose) std::cerr << "OpenMP threads: " << num_threads << std::endl;
-
+        
+        // Create batch progress bar if multiple batches
+        ProgressBar batch_progress_bar(total_queries, "Processing batches", batch_size < total_queries ? this->verbose : 0);
+        
+        // Suppress verbose output within batch if multiple batches
+        int verbose = batch_size < total_queries ? 0 : this->verbose;
+        
+        size_t cache_line_bits = 6;  // 2^6 = 64
+        size_t cache_line_size = 1 << cache_line_bits;
+        size_t cache_line_mask = cache_line_size - 1;
+        
         size_t block_size = 65536;
         size_t block_mask = block_size - 1;
+        
+        // Pre-allocate quantized queries buffer
+        size_t max_query_data_size = ((size_t)max_batch_queries * dimensions * bitDepth + 7) >> 3;
+        uint8_t* quantized_queries = (uint8_t*)malloc(max_query_data_size + 8);
+        assert(quantized_queries != nullptr && "Failed to allocate memory for quantized queries");
+        
+        // Pre-allocate query sketches memory
+        size_t sketch_bytes = (dimensions + 7) >> 3;
+        size_t sketch_qword_bytes = (sketch_bytes + 7) & ~7;
+        size_t sketch_mem_size = sketch_qword_bytes * max_batch_queries;
+        size_t sketch_mem_aligned_size = (sketch_mem_size + cache_line_mask) & ~cache_line_mask;
+        void* query_sketches_memory = malloc(sketch_mem_aligned_size + cache_line_size);
+        assert(query_sketches_memory != nullptr && "Failed to allocate memory for query sketches");
+        uint8_t* query_sketches = (uint8_t*)((size_t(query_sketches_memory) + cache_line_mask) & ~cache_line_mask);
+        
+        // Pre-allocate tree work memory
+        size_t work_size2 = 0;
+        
+        // Memory for per-query rankings (each thread needs rankings for all queries)
+        // Layout: [acceptable_score (int)] [Candidates]
+        size_t acceptable_score_bytes = sizeof(int);
+        size_t acceptable_score_qword_bytes = (acceptable_score_bytes + 7) & ~7;
+        
+        size_t per_query_ranking_capacity = dist_candidates * 4;
+        size_t per_query_ranking_bytes = sizeof(Candidates) + sizeof(Candidate) * per_query_ranking_capacity;
+        size_t per_query_ranking_qword_bytes = (per_query_ranking_bytes + 7) & ~7;
+        
+        size_t per_query_total_bytes = acceptable_score_qword_bytes + per_query_ranking_qword_bytes;
+        size_t all_query_rankings_bytes = per_query_total_bytes * max_batch_queries;
+        work_size2 += all_query_rankings_bytes;
 
-        // Prepare memory for tree processing (allocate in upper scope)
-        size_t tree_mem_size = sizeof(int) * num_queries;
-        size_t tree_mem_qword_size = (tree_mem_size + block_mask) & ~block_mask;
-        uint8_t* tree_mem_memory = (uint8_t*)malloc(tree_mem_qword_size * used_trees + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
-        assert(tree_mem_memory != nullptr && "Failed to allocate memory for tree processing");
-        uint8_t* tree_mem_base = (uint8_t*)((size_t(tree_mem_memory) + block_mask) & ~block_mask);
+        // Memory for index array (placed after rankings)
+        size_t indices_bytes = sizeof(int) * max_batch_queries;
+        size_t indices_qword_bytes = (indices_bytes + 7) & ~7;
+        work_size2 += indices_qword_bytes;
 
-        // Create progress bar for tree processing
-        ProgressBar tree_progress_bar(used_trees, "Processing trees", verbose);
-        {
-            int progress_omp_counter = 0;
+        work_size2 = (work_size2 + block_mask) & ~block_mask;
+        uint8_t * tree_work_memory = (uint8_t *)malloc(work_size2 * num_threads + block_size);
+        assert(tree_work_memory != nullptr && "Failed to allocate memory for thread work");
+        uint8_t * tree_whole_base = (uint8_t *)((size_t(tree_work_memory) + block_mask) & ~block_mask);
+        
+        // Pre-allocate query processing work memory
+        size_t work_size = 0;
 
-            // Prepare memory for each thread
-            size_t work_size2 = 0;
+        // Timing must always be placed first
+        size_t timing_bytes = sizeof(ForestTiming);
+        size_t timing_qword_bytes = (timing_bytes + 7) & ~7;
+        work_size += timing_qword_bytes;
 
-            // Memory for index array
-            size_t indices_bytes = sizeof(int) * num_queries;
-            size_t indices_qword_bytes = (indices_bytes + 7) & ~7;
-            work_size2 += indices_qword_bytes;
+        // Set capacity to handle merged rankings from all threads
+        size_t scores_capacity = dist_candidates * 4 * num_threads;
+        size_t scores_bytes = sizeof(Candidates) + sizeof(Candidate) * scores_capacity;
+        size_t scores_qword_bytes = (scores_bytes + 7) & ~7;
+        work_size += scores_qword_bytes;
 
-            work_size2 = (work_size2 + block_mask) & ~block_mask;
-            uint8_t * work_memory = (uint8_t *)malloc(work_size2 * num_threads + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
-            assert(work_memory != nullptr && "Failed to allocate memory for thread work");
-            uint8_t * whole_base = (uint8_t *)((size_t(work_memory) + block_mask) & ~block_mask);
+        size_t filtered_capacity = dist_candidates * (1 + hops + hops);
+        size_t filtered_bytes = sizeof(Candidates) + sizeof(Candidate) * filtered_capacity;
+        size_t filtered_qword_bytes = (filtered_bytes + 7) & ~7;
+        work_size += filtered_qword_bytes;
+
+        work_size = (work_size + block_mask) & ~block_mask;
+        uint8_t * work_memory = (uint8_t *)malloc(work_size * num_threads + block_size);
+        assert(work_memory != nullptr && "Failed to allocate memory for query processing");
+        uint8_t * whole_base = (uint8_t *)((size_t(work_memory) + block_mask) & ~block_mask);
+        
+        for (int batch_start = 0; batch_start < total_queries; batch_start += batch_size) {
+            int batch_end = std::min(batch_start + batch_size, total_queries);
+            int num_queries = batch_end - batch_start;
+        
+            // Array to store filtered candidate counts for statistics
+            std::vector<int> filtered_candidates_per_query(num_queries, 0);
             
-            // Query data is read-only so can be shared
-            uint8_t * queries = quantized_queries;
-            
-            // Parallel processing with OpenMP
-            #pragma omp parallel num_threads(num_threads)
+            // Quantize all queries once in advance
+            BitWriter queryWriter;
             {
-                int thread_id = omp_get_thread_num();
-                assert(0 <= thread_id && thread_id < num_threads);
-
-                uint8_t * work_base2 = whole_base + work_size2 * thread_id;
-
-                // Initialize index array
-                int* query_indices = (int*)(void*)work_base2;
-                for (int i = 0; i < num_queries; i++) {
-                    query_indices[i] = i;
-                }
-                work_base2 += indices_qword_bytes;
-
-                // Batch process for each tree
-                #pragma omp for schedule(dynamic)
-                for (int t = 0; t < used_trees; t++) {
-                    // Pointer to result storage array
-                    int* results = (int*)(tree_mem_base + tree_mem_qword_size * t);
-
-                    // Search all at once using HilbertTreeSearch
-                    HilbertTreeSearch searcher(trees[t].tree);
-                    // Calculate query bit count
-                    int totalQueryBits = dimensions * bitDepth;
-                    searcher.search(queries, num_queries, totalQueryBits, results, query_indices);
+                ProgressBar progress_bar(1, "Quantizing query points", verbose);
+                
+                float* query_ptr = (float*)buf.ptr + (size_t)batch_start * dimensions;
+                
+                BitQuantizer::transformToBits(query_ptr, queryWriter, num_queries, dimensions, quantization_rate, bitDepth);
+                queryWriter.finalizeBuffer();
+                
+                progress_bar.complete();
+            }
+            
+            // Copy quantized queries to pre-allocated buffer
+            size_t query_data_size = queryWriter.size();
+            assert(query_data_size <= max_query_data_size && "Query data size exceeds pre-allocated buffer");
+            std::memcpy(quantized_queries, queryWriter.data(), query_data_size);
+            
+            {
+                ProgressBar progress_bar(1, "Generating query sketches", verbose);
+                
+                // Process in cache_line_size chunks for better cache locality
+                int num_chunks = (num_queries + cache_line_mask) >> cache_line_bits;
+                
+                #pragma omp parallel for schedule(static)
+                for (int chunk = 0; chunk < num_chunks; chunk++) {
+                    int q_start = chunk << cache_line_bits;
+                    int q_end = std::min(q_start + (int)cache_line_size, num_queries);
+                    uint8_t* sketch_ptr = query_sketches + (size_t)q_start * sketch_qword_bytes;
                     
-                    // Update per-tree progress
-                    if (2<=verbose) {
-                        #pragma omp critical(progress_bar)
-                        {
-                            ++progress_omp_counter;
-                            if (thread_id==0) {
-                                tree_progress_bar.update(progress_omp_counter);
-                                progress_omp_counter = 0;
-                            }
-                        }
+                    for (int q = q_start; q < q_end; q++) {
+                        BitQuantizer::generateSketchFromBitPacked(quantized_queries, sketch_ptr, q, dimensions, bitDepth, sketch_qword_bytes);
+                        sketch_ptr += sketch_qword_bytes;
                     }
                 }
+                
+                progress_bar.complete();
             }
 
-            // Free thread memory
-            free(work_memory);
-        }
-        tree_progress_bar.complete();
-        
-        // Process each query in parallel
-        {
-            ProgressBar progress_bar(num_queries, "Processing queries", verbose);
-            int progress_omp_counter = 0;
-            
-            // Prepare sketch buffer for each thread
-            size_t work_size = 0;
 
-            // Timing must always be placed first
-            size_t timing_bytes = sizeof(ForestTiming);
-            size_t timing_qword_bytes = (timing_bytes + 7) & ~7;
-            work_size += timing_qword_bytes;
-
-            // Calculate sketch size
-            size_t sketch_bytes = (dimensions + 7) >> 3;
-            size_t sketch_qword_bytes = (sketch_bytes + 7) & ~7;
-            work_size += sketch_qword_bytes;
-
-            // Set threshold for early filtering (4 * dist_candidates)
-            size_t scores_capacity = dist_candidates * 4;
-            size_t scores_bytes = sizeof(Candidates) + sizeof(Candidate) * scores_capacity;
-            size_t scores_qword_bytes = (scores_bytes + 7) & ~7;
-            work_size += scores_qword_bytes;
-
-            size_t filtered_capacity = dist_candidates * (1 + hops + hops);
-            size_t filtered_bytes = sizeof(Candidates) + sizeof(Candidate) * filtered_capacity;
-            size_t filtered_qword_bytes = (filtered_bytes + 7) & ~7;
-            work_size += filtered_qword_bytes;
-
-            work_size = (work_size + block_mask) & ~block_mask;
-            uint8_t * work_memory = (uint8_t *)malloc(work_size * num_threads + block_size);// Actually +block_mask would be sufficient, but that would always allocate odd bytes which feels awkward, and allocating 1 extra byte (not -1) might result in better memory reuse in malloc/free cycles
-            assert(work_memory != nullptr && "Failed to allocate memory for query processing");
-            uint8_t * whole_base = (uint8_t *)((size_t(work_memory) + block_mask) & ~block_mask);
-            
-            // Parallel processing with OpenMP
-            #pragma omp parallel num_threads(num_threads)
+            // Create progress bar for tree processing
+            ProgressBar tree_progress_bar(used_trees, "Processing trees", verbose);
             {
-                int thread_id = omp_get_thread_num();
-                assert(0 <= thread_id && thread_id < num_threads);
-
-                uint8_t * work_base = whole_base + work_size * thread_id;
-
-                ForestTiming & timing = *(ForestTiming*)(void*)work_base;
-                timing.reset();
-                work_base += timing_qword_bytes;
-
-                uint8_t * const query_sketch = work_base;
-                work_base += sketch_qword_bytes;
-
-                Candidates & scores = *(Candidates*)(void*)work_base;
-                scores.init(scores_capacity);
-                work_base += scores_qword_bytes;
-
-                Candidates & filtered = *(Candidates*)(void*)work_base;
-                filtered.init(filtered_capacity);
-                work_base += filtered_qword_bytes;
+                int progress_omp_counter = 0;
                 
-                #pragma omp for schedule(dynamic)
-                for (size_t q = 0; q < size_t(num_queries); q++) {
-                    // Clear per-thread work buffers
-                    scores.clear();
-                    filtered.clear();
+                // Query data is read-only so can be shared
+                uint8_t * queries = quantized_queries;
                 
-                    // Generate sketch from query
-                    {
-                        ScopedTimer timer(timing.search_sketch);
-                        BitQuantizer::generateSketchFromBitPacked(quantized_queries, query_sketch, q, dimensions, bitDepth, sketch_qword_bytes);
+                // Parallel processing with OpenMP
+                #pragma omp parallel num_threads(num_threads)
+                {
+                    int thread_id = omp_get_thread_num();
+                    assert(0 <= thread_id && thread_id < num_threads);
+
+                    uint8_t * work_base2 = tree_whole_base + work_size2 * thread_id;
+                    
+                    // Initialize per-query rankings and acceptable scores
+                    uint8_t* query_rankings_base = work_base2;
+                    for (int i = 0; i < num_queries; i++) {
+                        uint8_t* query_data = query_rankings_base + per_query_total_bytes * i;
+                        
+                        // Initialize acceptable score
+                        int* acceptable_score = (int*)(void*)query_data;
+                        *acceptable_score = dimensions;  // Initially accept all distances
+                        
+                        // Initialize ranking
+                        Candidates& ranking = *(Candidates*)(void*)(query_data + acceptable_score_qword_bytes);
+                        ranking.init(per_query_ranking_capacity);
+                        ranking.clear();
                     }
-                    // Get pointer to quantized query
-                    {
-                        ScopedTimer timer(timing.search_pickup);
-                        // Collect results from each tree for this query
-                        assert(0 <= q && q < size_t(num_queries));
+                    work_base2 += all_query_rankings_bytes;
+
+                    // Initialize index array (after rankings)
+                    int* query_indices = (int*)(void*)work_base2;
+                    for (int i = 0; i < num_queries; i++) {
+                        query_indices[i] = i;
+                    }
+                    work_base2 += indices_qword_bytes;
+
+                    // Batch process for each tree
+                    #pragma omp for schedule(dynamic)
+                    for (int t = 0; t < used_trees; t++) {
+                        // Search all at once using HilbertTreeSearch
+                        HilbertTreeSearch searcher(trees[t].tree);
+                        // Calculate query bit count
+                        int totalQueryBits = dimensions * bitDepth;
+                        searcher.search(queries, num_queries, totalQueryBits, query_indices,
+                                    query_sketches, sketches_data, sketch_qword_bytes,
+                                    query_rankings_base, per_query_total_bytes, acceptable_score_qword_bytes,
+                                    even_candidates, odd_candidates, dist_candidates, num_points, dimensions);
                         
-                        // Maximum acceptable score (initially infinite)
-                        int max_acceptable_score = dimensions;
-                        int total_candidates = 0;
-                        
-                        for (int tree_id = 0; tree_id < used_trees; tree_id++) {
-                            // Read results directly from tree_mem_base
-                            int* tree_results = (int*)(tree_mem_base + tree_mem_qword_size * tree_id);
-                            const int leafValue = tree_results[q];
-                            // Parse leafValue to get index and flag
-                            const int index = leafValue >> 1;
-                            const bool flag = leafValue & 1;
-                            
-                            // Determine number of candidates based on leaf node size parity
-                            const int candidates = flag ? odd_candidates : even_candidates;
-                            assert(candidates > 0);
-                            
-                            // Calculate range of candidate indices
-                            const int half_rangeL = candidates >> 1;
-                            const int half_rangeR = (candidates+1) >> 1;
-                            const int start_idx = std::max(0, index - half_rangeL);
-                            const int end_idx = std::min(index + half_rangeR, num_points);
-                            total_candidates += end_idx - start_idx;
-                            
-                            // Process each candidate
-                            assert(0 <= tree_id && tree_id < int(trees.size()));
-                            assert(trees[tree_id].tree != nullptr);
-                            const uint8_t* tree_data = trees[tree_id].tree->getData();
-                            size_t pointIdPos = trees[tree_id].tree->pointIdOffset + size_t(start_idx) * trees[tree_id].tree->pointIdBits;
-                            for (int idx = start_idx; idx < end_idx; idx++, pointIdPos += trees[tree_id].tree->pointIdBits) {
-                                assert(0 <= idx && idx < num_points);
-                                // Get GRP_IDX from leaf node encoding
-                                
-                                assert(tree_data != nullptr);
-                                size_t pre_idx = readBits(tree_data, pointIdPos, trees[tree_id].tree->pointIdBits);
-                                assert(pre_idx < size_t(num_points));
-                                
-                                // Get data point sketch and calculate sketch distance
-                                size_t offset = pre_idx * sketch_qword_bytes;
-                                assert(offset + sketch_qword_bytes <= sketch_qword_bytes * num_points);
-                                uint8_t* data_sketch = sketches_data + offset;
-                                
-                                // Use Hamming distance directly (smaller means higher similarity)
-                                int distance = SketchUtils::hammingDistance(query_sketch, data_sketch, sketch_qword_bytes, max_acceptable_score);
-        
-                                // Only add if current score is less than max acceptable score
-                                if (distance <= max_acceptable_score) {
-                                    // Use distance directly as score (smaller is better)
-                                    // Store PRE_IDX in scores
-                                    scores.emplace_back(distance, pre_idx);
-                                    
-                                    // Perform early filtering if candidate count exceeds threshold
-                                    if (scores.full()) {
-                                        ScopedTimer sort_timer(timing.search_sort);
-                                        
-                                        // Sort all and filter
-                                        std::sort(scores.begin(), scores.end());
-                                        scores.resize(std::min((int)std::distance(scores.begin(), std::unique(scores.begin(), scores.end())), dist_candidates));
-                                        
-                                        // Update maximum acceptable score
-                                        if(scores.size() == dist_candidates) {
-                                            max_acceptable_score = std::get<0>(scores.back()) - 1;
-                                        }
-                                    }
+                        // Update per-tree progress
+                        if (2<=verbose) {
+                            #pragma omp critical(progress_bar)
+                            {
+                                ++progress_omp_counter;
+                                if (thread_id==0) {
+                                    tree_progress_bar.update(progress_omp_counter);
+                                    progress_omp_counter = 0;
                                 }
                             }
                         }
-                        total_candidates_per_query[q] += total_candidates;
                     }
+                }
+            }
+            tree_progress_bar.complete();
+            
+            // Process each query in parallel
+            {
+                ProgressBar progress_bar(num_queries, "Processing queries", verbose);
+                int progress_omp_counter = 0;
                 
-                    {
-                        ScopedTimer timer(timing.search_sort);
+                
+                // Parallel processing with OpenMP
+                #pragma omp parallel num_threads(num_threads)
+                {
+                    int thread_id = omp_get_thread_num();
+                    assert(0 <= thread_id && thread_id < num_threads);
 
-                        // Sort all and filter
-                        std::sort(scores.begin(), scores.end());
-                        scores.resize(std::min((int)std::distance(scores.begin(), std::unique(scores.begin(), scores.end())), dist_candidates));
-                        filtered_candidates_per_query[q] = scores.size();
-                    }
-                
-                    // Distance calculation for this query
-                    {
-                        ScopedTimer timer(timing.search_distance);
+                    uint8_t * work_base = whole_base + work_size * thread_id;
+
+                    ForestTiming & timing = *(ForestTiming*)(void*)work_base;
+                    timing.reset();
+                    work_base += timing_qword_bytes;
+
+                    Candidates & scores = *(Candidates*)(void*)work_base;
+                    scores.init(scores_capacity);
+                    work_base += scores_qword_bytes;
+
+                    Candidates & filtered = *(Candidates*)(void*)work_base;
+                    filtered.init(filtered_capacity);
+                    work_base += filtered_qword_bytes;
                     
-                        // Process each candidate group
-                        for (int j = 0; j < scores.size(); j++) {
-                            // scores contains [score, PRE_IDX]
-                            int base_pre_idx = std::get<1>(scores[j]);
-                            assert(0 <= base_pre_idx && base_pre_idx < num_points);
-                            
-                            // [begin, end)
-                            int begin = std::max(0, base_pre_idx - hops);
-                            int end = std::min(base_pre_idx + 1 + hops, num_points);
-                            
-                            // Calculate distance for all points in group
-                            for (int pre_idx = begin; pre_idx < end; ++pre_idx) {
-                                // Get sketch for this point
-                                size_t sketch_stride = (size_t((dimensions + 7) >> 3) + 7) & ~7;
-                                uint8_t* point_sketch = sketches_data + (size_t)pre_idx * sketch_stride;
-                                
-                                // Calculate squared distance using compressed data + sketch
-                                int distance2 = BitQuantizer::calculateSquaredDistanceCompressed(
-                                    points_data, pre_idx, point_sketch, sketch_stride,
-                                    quantized_queries, q, dimensions, bitDepth, laneCount);
-                                
-                                // Use squared Euclidean distance as score (smaller is better)
-                                filtered.emplace_back(distance2, pre_idx);
-                            }
-                        }
-                    }
-                
-                    // Process final results
-                    {
-                        ScopedTimer timer(timing.search_topk);
-                        // Sort by score (ascending distance)
-                        std::sort(filtered.begin(), filtered.end());
-                        
-                        // Remove duplicates
-                        filtered.erase_to_end(std::unique(filtered.begin(), filtered.end()));
-                        
-                        // Store k results (verify sufficient candidates)
-                        assert(int(filtered.size()) >= k);
-                        
-                        for (int i = 0; i < k; i++) {
-                            d_ptr(q, i) = std::get<0>(filtered[i]);
-                            // Convert PRE_IDX to original ID and store
-                            i_ptr(q, i) = id_mapping.preidx_to_id[std::get<1>(filtered[i])];
-                        }
-                    }
+                    #pragma omp for schedule(dynamic)
+                    for (size_t q = 0; q < size_t(num_queries); q++) {
+                        // Clear per-thread work buffers
+                        scores.clear();
+                        filtered.clear();
                     
-                    // Progress bar update temporarily disabled
-                    if (2<=verbose) {
-                        #pragma omp critical(progress_bar)
                         {
-                            ++progress_omp_counter;
-                            if (thread_id==0) {
-                                progress_bar.update(progress_omp_counter);
-                                progress_omp_counter = 0;
+                            ScopedTimer timer(timing.search_pickup);
+                            // Merge rankings from all threads for this query
+                            assert(0 <= q && q < size_t(num_queries));
+                            
+                            // Merge rankings from all threads
+                            for (int tid = 0; tid < num_threads; tid++) {
+                                // Get thread's ranking for this query
+                                uint8_t* thread_work_base = tree_whole_base + work_size2 * tid;
+                                uint8_t* thread_query_data = thread_work_base + per_query_total_bytes * q;
+                                Candidates& thread_ranking = *(Candidates*)(void*)(thread_query_data + acceptable_score_qword_bytes);
+                                
+                                // Copy all candidates from thread's ranking to scores
+                                for (int i = 0; i < thread_ranking.size(); i++) {
+                                    scores.emplace_back(thread_ranking[i]);
+                                }
+                            }
+                        }
+                    
+                        {
+                            ScopedTimer timer(timing.search_sort);
+
+                            // Sort all and filter
+                            std::sort(scores.begin(), scores.end());
+                            scores.resize(std::min((int)std::distance(scores.begin(), std::unique(scores.begin(), scores.end())), dist_candidates));
+                            filtered_candidates_per_query[q] = scores.size();
+                        }
+                    
+                        // Distance calculation for this query
+                        {
+                            ScopedTimer timer(timing.search_distance);
+                        
+                            // Process each candidate group
+                            for (int j = 0; j < scores.size(); j++) {
+                                // scores contains [score, PRE_IDX]
+                                int base_pre_idx = std::get<1>(scores[j]);
+                                assert(0 <= base_pre_idx && base_pre_idx < num_points);
+                                
+                                // [begin, end)
+                                int begin = std::max(0, base_pre_idx - hops);
+                                int end = std::min(base_pre_idx + 1 + hops, num_points);
+                                
+                                // Calculate distance for all points in group
+                                for (int pre_idx = begin; pre_idx < end; ++pre_idx) {
+                                    // Get sketch for this point
+                                    size_t sketch_stride = (size_t((dimensions + 7) >> 3) + 7) & ~7;
+                                    uint8_t* point_sketch = sketches_data + (size_t)pre_idx * sketch_stride;
+                                    
+                                    // Calculate squared distance using compressed data + sketch
+                                    int distance2 = BitQuantizer::calculateSquaredDistanceCompressed(
+                                        points_data, pre_idx, point_sketch, sketch_stride,
+                                        quantized_queries, q, dimensions, bitDepth, laneCount);
+                                    
+                                    // Use squared Euclidean distance as score (smaller is better)
+                                    filtered.emplace_back(distance2, pre_idx);
+                                }
+                            }
+                        }
+                    
+                        // Process final results
+                        {
+                            ScopedTimer timer(timing.search_topk);
+                            // Sort by score (ascending distance)
+                            std::sort(filtered.begin(), filtered.end());
+                            
+                            // Remove duplicates
+                            filtered.erase_to_end(std::unique(filtered.begin(), filtered.end()));
+                            
+                            // Store k results (verify sufficient candidates)
+                            assert(int(filtered.size()) >= k);
+                            
+                            for (int i = 0; i < k; i++) {
+                                d_ptr(batch_start + q, i) = std::get<0>(filtered[i]);
+                                // Convert PRE_IDX to original ID and store
+                                i_ptr(batch_start + q, i) = id_mapping.preidx_to_id[std::get<1>(filtered[i])];
+                            }
+                        }
+                        
+                        // Progress bar update temporarily disabled
+                        if (2<=verbose) {
+                            #pragma omp critical(progress_bar)
+                            {
+                                ++progress_omp_counter;
+                                if (thread_id==0) {
+                                    progress_bar.update(progress_omp_counter);
+                                    progress_omp_counter = 0;
+                                }
                             }
                         }
                     }
                 }
-            }
-            
-            progress_bar.complete();
-            
-            // Merge timing information from each thread
-            if (2<=verbose) {
-                for (int thread_id = 0; thread_id < num_threads; ++thread_id) {
-                    timing.merge(*(ForestTiming*)(void*)(whole_base + (thread_id * work_size)));
+                
+                progress_bar.complete();
+                
+                // Merge timing information from each thread
+                if (2<=verbose) {
+                    for (int thread_id = 0; thread_id < num_threads; ++thread_id) {
+                        timing.merge(*(ForestTiming*)(void*)(whole_base + (thread_id * work_size)));
+                    }
                 }
             }
-            
-            // Free thread memory
-            free(work_memory);
-        }
-        
-        if (2<=verbose) {
-            float rate = 1.0 / num_threads;
-            std::cerr << "  Sketch creation time: " << timing.search_sketch * rate << "s" << std::endl;
-            std::cerr << "  Candidate extraction time: " << timing.search_pickup * rate << "s" << std::endl;
-            std::cerr << "  Candidate sorting time: " << timing.search_sort * rate << "s" << std::endl;
-            std::cerr << "  Final result selection time: " << timing.search_topk * rate << "s" << std::endl;
-            std::cerr << "  Distance calculation time: " << timing.search_distance * rate << "s" << std::endl;
+            if (2<=verbose) {
+                float rate = 1.0 / num_threads;
+                std::cerr << "  Candidate extraction time: " << timing.search_pickup * rate << "s" << std::endl;
+                std::cerr << "  Candidate sorting time: " << timing.search_sort * rate << "s" << std::endl;
+                std::cerr << "  Final result selection time: " << timing.search_topk * rate << "s" << std::endl;
+                std::cerr << "  Distance calculation time: " << timing.search_distance * rate << "s" << std::endl;
 
-            // Candidate statistics
-            double avg_total = 0.0, avg_filtered = 0.0;
-            for (int q = 0; q < num_queries; q++) {
-                avg_total += total_candidates_per_query[q];
-                avg_filtered += filtered_candidates_per_query[q];
+                // Candidate statistics
+                double avg_filtered = 0.0;
+                for (int q = 0; q < num_queries; q++) {
+                    avg_filtered += filtered_candidates_per_query[q];
+                }
+                avg_filtered /= num_queries;
+
+                std::cerr << "Statistics:" << std::endl;
+                std::cerr << "  Average filtered candidates: " << avg_filtered << std::endl;
             }
-            avg_total /= num_queries;
-            avg_filtered /= num_queries;
-
-            std::cerr << "Statistics:" << std::endl;
-            std::cerr << "  Average candidates (all trees, including duplicates): " << avg_total << std::endl;
-            std::cerr << "  Average filtered candidates: " << avg_filtered << std::endl;
-            std::cerr << "  Filtering rate: " << avg_filtered / avg_total * 100.0 << "%" << std::endl;
+            
+            batch_progress_bar.update(num_queries);
         }
         
-        free(tree_mem_memory);
+        batch_progress_bar.complete();
+        
+        // Free all pre-allocated memory
+        free(work_memory);
+        free(tree_work_memory);
         free(quantized_queries);
+        free(query_sketches_memory);
         
         return std::make_tuple(D, I);
     }
