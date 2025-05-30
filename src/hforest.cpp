@@ -44,6 +44,7 @@ using Candidates = fast_vector<Candidate>;
 #include "bit_quantize.hpp"
 #include "htree.hpp"
 #include "hsort.hpp"
+#include "hsort_graph.hpp"
 #include "tree_encoder.hpp"
 #include "hsearch.hpp"
 
@@ -883,6 +884,332 @@ public:
         return std::make_tuple(D, I);
     }
     
+    // Graph construction: build graph from points themselves
+    std::tuple<py::array_t<float>, py::array_t<int>> graph(py::array_t<float> points, int k) {
+        timing.reset();
+        
+        // Verify point dimensions
+        py::buffer_info buf = points.request();
+        assert(buf.ndim == 2 && "Points array must be 2-dimensional");
+        
+        int num_points = buf.shape[0];
+        int data_dimensions = buf.shape[1];
+        
+        // Set dimensions if not already set
+        if (dimensions == -1) {
+            dimensions = data_dimensions;
+            // Calculate quantization_rate once when dimensions are set
+            float midpoint = (float)(1LL << (bitDepth - 1));
+            quantization_rate = sqrt(sqrt(dimensions)) * midpoint;
+            laneCount = 57 / bitDepth;
+        } else {
+            assert(data_dimensions == dimensions && "Point dimensions must match previously set dimensions");
+        }
+        
+        if(verbose) std::cerr << "Graph construction: points=" << num_points << ", k=" << k << std::endl;
+
+        // Create result arrays
+        py::array_t<float> D(py::array::ShapeContainer({num_points, k}));
+        py::array_t<int> I(py::array::ShapeContainer({num_points, k}));
+        
+        auto d_ptr = D.mutable_unchecked<2>();
+        auto i_ptr = I.mutable_unchecked<2>();
+        
+        // Quantize point data for graph construction
+        constexpr size_t cache_line_bits = 6;  // 2^6 = 64
+        constexpr size_t cache_line_size = 1 << cache_line_bits;
+        constexpr size_t cache_line_mask = cache_line_size - 1;
+        
+        size_t quantized_size = num_points * dimensions;
+        size_t quantized_aligned_size = (quantized_size + cache_line_mask) & ~cache_line_mask;
+        void* quantized_memory = malloc(quantized_aligned_size + cache_line_size);
+        assert(quantized_memory != nullptr && "Failed to allocate memory for quantized data");
+        uint8_t* quantized_data = (uint8_t*)((size_t(quantized_memory) + cache_line_mask) & ~cache_line_mask);
+        
+        {
+            ProgressBar progress_bar(1, "Quantizing points for graph", verbose);
+            
+            float* points_ptr = (float*)buf.ptr;
+            BitQuantizer::transformToBitsForGraph(points_ptr, quantized_data, 
+                                                 num_points, dimensions, quantization_rate);
+            
+            progress_bar.complete();
+        }
+        
+        // Generate sketches for all points
+        assert((dimensions & 63) == 0 && "dimensions must be multiple of 64 for efficient sketch generation");
+        
+        size_t sketch_bytes = (dimensions + 7) >> 3;
+        size_t sketch_qword_bytes = (sketch_bytes + 7) & ~7;
+        size_t sketch_qwords = sketch_qword_bytes >> 3;  // Number of 64-bit words per sketch
+        size_t sketch_mem_size = sketch_qword_bytes * num_points;
+        size_t sketch_aligned_size = (sketch_mem_size + cache_line_mask) & ~cache_line_mask;
+        void* sketches_memory = malloc(sketch_aligned_size + cache_line_size);
+        assert(sketches_memory != nullptr && "Failed to allocate memory for sketches");
+        uint8_t* sketches_data = (uint8_t*)((size_t(sketches_memory) + cache_line_mask) & ~cache_line_mask);
+        
+        {
+            ProgressBar progress_bar(1, "Generating sketches", verbose);
+            
+            size_t num_batches = (num_points + cache_line_mask) >> cache_line_bits;
+            
+            #pragma omp parallel for
+            for (size_t batch = 0; batch < num_batches; batch++) {
+                size_t start = batch << cache_line_bits;
+                size_t end = std::min(start + cache_line_size, (size_t)num_points);
+                
+                uint64_t* sketch_ptr = (uint64_t*)(sketches_data + start * sketch_qword_bytes);
+                uint8_t* point_data = quantized_data + start * dimensions;
+                
+                for (size_t i = start; i < end; i++) {
+                    // Process dimensions in 64-bit chunks
+                    int dim_qwords = dimensions >> 6;  // dimensions / 64
+                    for (int q = 0; q < dim_qwords; q++) {
+                        uint64_t bits = 0;
+                        for (int j = 0; j < 64; j++) {
+                            bits = bits + bits + (128 <= point_data[q * 64 + j]);
+                        }
+                        sketch_ptr[q] = bits;
+                    }
+                    
+                    // Move to next point
+                    sketch_ptr += sketch_qwords;
+                    point_data += dimensions;
+                }
+            }
+            
+            progress_bar.complete();
+        }
+        
+        // Prepare for parallel tree processing
+        int num_threads = omp_get_max_threads();
+        
+        if (verbose) std::cerr << "Using " << ntrees << " trees with " << num_threads << " threads" << std::endl;
+        
+        // Allocate memory for sorted indices (per thread)
+        size_t indices_size = sizeof(int) * num_points;
+        size_t indices_aligned_size = (indices_size + cache_line_mask) & ~cache_line_mask;
+        void* indices_memory = malloc(indices_aligned_size * num_threads + cache_line_size);
+        assert(indices_memory != nullptr && "Failed to allocate memory for indices");
+        uint8_t* indices_base = (uint8_t*)((size_t(indices_memory) + cache_line_mask) & ~cache_line_mask);
+        
+        // Allocate memory for rankings (one per point) - using fast_vector<uint32_t> for packed values
+        size_t ranking_capacity = dist_candidates * 4;  // 4x buffer for duplicate handling
+        size_t ranking_bytes = sizeof(fast_vector<uint32_t>) + sizeof(uint32_t) * ranking_capacity;
+        size_t ranking_aligned_bytes = (ranking_bytes + cache_line_mask) & ~cache_line_mask;
+        void* rankings_memory = malloc(ranking_aligned_bytes * num_points + cache_line_size);
+        assert(rankings_memory != nullptr && "Failed to allocate memory for rankings");
+        uint8_t* rankings = (uint8_t*)((size_t(rankings_memory) + cache_line_mask) & ~cache_line_mask);
+        
+        // Allocate memory for shuffled axes and RNGs (per thread)
+        std::vector<std::vector<int>> thread_shuffled_axes(num_threads);
+        std::vector<std::mt19937> thread_rngs(num_threads);
+        
+        // Initialize all rankings
+        for (int i = 0; i < num_points; i++) {
+            fast_vector<uint32_t>& ranking = *(fast_vector<uint32_t>*)(rankings + i * ranking_aligned_bytes);
+            ranking.init(ranking_capacity);
+            // *** IMPORTANT: Contest requires including self in k-NN results ***
+            // Add self with distance 0 (packed as: 0 << 23 | i)
+            ranking.emplace_back(i);
+        }
+        
+        // Threshold tracking for each point
+        std::vector<uint32_t> thresholds(num_points, 0xFFFFFFFF);  // Max value initially
+        
+        // Generate base seed for thread RNGs
+        unsigned int base_seed = rng();
+        
+        // Pre-calculate neighbor search range
+        int odd_candidates_half = odd_candidates >> 1;
+        int odd_candidates_half_plus = odd_candidates - odd_candidates_half;
+        
+        // Process trees in batches of num_threads
+        ProgressBar tree_progress_bar(ntrees, "Processing trees for graph", verbose);
+        
+        for (int batch_start = 0; batch_start < ntrees; batch_start += num_threads) {
+            int batch_end = std::min(batch_start + num_threads, ntrees);
+            int batch_size = batch_end - batch_start;
+            
+            // Sort phase: each thread processes one tree
+            #pragma omp parallel num_threads(batch_size)
+            {
+                int thread_id = omp_get_thread_num();
+                
+                // Get thread-local memory and data
+                int* sorted_indices = (int*)(indices_base + thread_id * indices_aligned_size);
+                std::vector<int>& shuffled_axes = thread_shuffled_axes[thread_id];
+                std::mt19937& thread_rng = thread_rngs[thread_id];
+                
+                // Initialize on first batch
+                if (batch_start == 0) {
+                    // Initialize indices
+                    for (int i = 0; i < num_points; i++) {
+                        sorted_indices[i] = i;
+                    }
+                    
+                    // Initialize shuffled axes
+                    shuffled_axes.resize(dimensions);
+                    for (int i = 0; i < dimensions; i++) {
+                        shuffled_axes[i] = i;
+                    }
+                    
+                    // Initialize thread RNG with combination of base seed and thread id
+                    thread_rng = std::mt19937(base_seed ^ (thread_id * 0x9e3779b9));
+                }
+                
+                // Shuffle axes for this tree
+                std::shuffle(shuffled_axes.begin(), shuffled_axes.end(), thread_rng);
+                
+                // Sort points using HilbertSortGraph
+                HilbertSortGraph sorter(shuffled_axes, 8, thread_rng, quantized_data, dimensions, 1);
+                sorter.sort(sorted_indices, num_points);
+            }
+            
+            // Neighbor extraction phase
+            for (int t = 0; t < batch_size; t++) {
+                int* sorted_indices = (int*)(indices_base + t * indices_aligned_size);
+                
+                #pragma omp parallel num_threads(num_threads)
+                {
+                    #pragma omp for schedule(dynamic)
+                    for (int idx = 0; idx < num_points; idx++) {
+                        int point_id = sorted_indices[idx];
+                        
+                        // Get ranking for point_id
+                        fast_vector<uint32_t>& ranking = *(fast_vector<uint32_t>*)(rankings + point_id * ranking_aligned_bytes);
+                        
+                        // Get sketch for point_id
+                        uint8_t* point_sketch = sketches_data + point_id * sketch_qword_bytes;
+                        
+                        // Look at neighbors in sorted order (half-open interval [start, end))
+                        int start = std::max(0, idx - odd_candidates_half);
+                        int end = std::min(num_points, idx + odd_candidates_half_plus);
+                        
+                        for (int neighbor_idx = start; neighbor_idx < end; neighbor_idx++) {
+                            if (neighbor_idx != idx) {
+                                int neighbor_id = sorted_indices[neighbor_idx];
+                                
+                                // Calculate Hamming distance between sketches
+                                uint8_t* neighbor_sketch = sketches_data + neighbor_id * sketch_qword_bytes;
+                                uint32_t hamming_distance = SketchUtils::hammingDistance(point_sketch, neighbor_sketch, sketch_bytes, dimensions);
+                                
+                                // Pack hamming_distance (9 bits) and neighbor_id (23 bits) into single uint32_t
+                                // Upper 9 bits for distance, lower 23 bits for ID
+                                uint32_t packed_value = (hamming_distance << 23) | (neighbor_id & 0x7FFFFF);
+                                
+                                // Check threshold first
+                                if (packed_value < thresholds[point_id]) {
+                                    ranking.emplace_back(packed_value);
+                                    
+                                    // If buffer is full, sort and remove duplicates
+                                    if (ranking.full()) {
+                                        // Sort by packed value (distance then id)
+                                        std::sort(ranking.begin(), ranking.end());
+                                        
+                                        // Remove duplicates
+                                        ranking.erase_to_end(std::unique(ranking.begin(), ranking.end()));
+                                        
+                                        // Update threshold if we have enough unique candidates
+                                        if (ranking.size() >= dist_candidates) {
+                                            ranking.resize(dist_candidates);
+                                            thresholds[point_id] = ranking.back();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            tree_progress_bar.update(batch_size);
+        }
+        
+        tree_progress_bar.complete();
+        
+        // Process rankings to compute final k-NN
+        ProgressBar final_progress_bar(num_points, "Computing final k-NN", verbose);
+        
+        #pragma omp parallel num_threads(num_threads)
+        {
+            int thread_id = omp_get_thread_num();
+            
+            // Allocate work memory for distance calculations
+            std::vector<std::pair<int, int>> candidates;
+            candidates.reserve(dist_candidates);
+            
+            // Progress counter
+            int progress_counter = 0;
+            
+            #pragma omp for schedule(dynamic)
+            for (int point_id = 0; point_id < num_points; point_id++) {
+                fast_vector<uint32_t>& ranking = *(fast_vector<uint32_t>*)(rankings + point_id * ranking_aligned_bytes);
+                candidates.clear();
+                
+                // Final sort and deduplication
+                std::sort(ranking.begin(), ranking.end());
+                ranking.erase_to_end(std::unique(ranking.begin(), ranking.end()));
+                
+                // Limit to dist_candidates
+                if (ranking.size() > dist_candidates) {
+                    ranking.resize(dist_candidates);
+                }
+                
+                // Calculate actual distances for all candidates
+                uint8_t* point_data = quantized_data + point_id * dimensions;
+                
+                for (int i = 0; i < ranking.size(); i++) {
+                    uint32_t packed = ranking[i];
+                    uint32_t neighbor_id = packed & 0x7FFFFF;
+                    
+                    // Calculate actual squared distance
+                    int distance2 = 0;
+                    uint8_t* neighbor_data = quantized_data + neighbor_id * dimensions;
+                    
+                    for (int d = 0; d < dimensions; d++) {
+                        int diff = (int)point_data[d] - (int)neighbor_data[d];
+                        distance2 += diff * diff;
+                    }
+                    
+                    candidates.emplace_back(distance2, neighbor_id);
+                }
+                
+                // Sort by actual distance and select top k
+                std::sort(candidates.begin(), candidates.end());
+                
+                // Verify we have enough candidates
+                assert((int)candidates.size() >= k && "Not enough candidates for k-NN");
+                
+                // Store results
+                for (int i = 0; i < k; i++) {
+                    d_ptr(point_id, i) = (float)candidates[i].first;
+                    i_ptr(point_id, i) = candidates[i].second;
+                }
+                
+                // Update progress
+                #pragma omp critical(progress_bar)
+                {
+                    progress_counter++;
+                    if (thread_id == 0) {
+                        final_progress_bar.update(progress_counter);
+                        progress_counter = 0;
+                    }
+                }
+            }
+        }
+        
+        final_progress_bar.complete();
+        
+        free(rankings_memory);
+        free(indices_memory);
+        
+        free(sketches_memory);
+        free(quantized_memory);
+        
+        return std::make_tuple(D, I);
+    }
+    
     py::dict get_timing_info() const {
         return timing.get_timing_info();
     }
@@ -947,6 +1274,10 @@ PYBIND11_MODULE(hforest, m) {
              py::arg("queries"), 
              py::arg("k") = 10,
              "Search k nearest neighbors for query points")
+        .def("graph", &HilbertForest::graph,
+             py::arg("points"),
+             py::arg("k") = 10,
+             "Build k-NN graph from points themselves")
         .def_property_readonly("is_trained", &HilbertForest::is_trained_getter)
         .def_property("ntrees", 
                      &HilbertForest::get_ntrees, 
