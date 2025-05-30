@@ -31,7 +31,27 @@ public:
             writer.writeBits(quantized, bitWidth);
         }
     }
-    
+
+    static void transformToBitsForGraph(const float* input, uint8_t * output, 
+                               size_t numPoints, int dimensions, float rate) {
+        constexpr size_t cache_line_bits = 6;  // 2^6 = 64
+        constexpr size_t cache_line_size = 1 << cache_line_bits;
+        constexpr size_t cache_line_mask = cache_line_size - 1;
+        
+        size_t totalValues = numPoints * dimensions;
+        size_t num_batches = (totalValues + cache_line_mask) >> cache_line_bits;
+        
+        #pragma omp parallel for
+        for (size_t batch = 0; batch < num_batches; batch++) {
+            size_t start = batch << cache_line_bits;
+            size_t end = std::min(start + cache_line_size, totalValues);
+            
+            for (size_t i = start; i < end; i++) {
+                output[i] = quantizeValue(input[i], rate, 128);
+            }
+        }
+    }
+
     // Compress existing bit-packed data by removing MSB (bitWidth -> bitWidth-1)
     // MSB information will be reconstructed from sketch during distance calculation
     static void compressBitPackedData(const uint8_t* input, BitWriter& writer,
