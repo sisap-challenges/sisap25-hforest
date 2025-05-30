@@ -126,6 +126,8 @@ def run(task, verbose_level=1):
         build_start = time.time()
         index.fit()  # Use preloaded data
         build_time = time.time() - build_start
+    elif task == 'task2':
+        build_time = 0
     else:
         # Build index with normal fit
         index.fit(data)
@@ -138,7 +140,7 @@ def run(task, verbose_level=1):
     
     # Accept user input in interactive mode
     if sys.stdin.isatty():
-        hyper_params = gen_hyper_params(ntrees, hyper_params[-1])
+        hyper_params = gen_hyper_params(ntrees if task != 'task2' else 10000, hyper_params[-1])
     for search_trees, even, odd, dist, hops in hyper_params:
         print(f"Starting search on {queries.shape} with ntrees={search_trees}")
         start = time.time()
@@ -147,7 +149,10 @@ def run(task, verbose_level=1):
         index.odd_candidates = odd      # Candidates for odd-level nodes
         index.dist_candidates = dist    # Number of candidates for distance calculation
         index.hops = hops               # Search range for neighboring points (pre_idx ±hops)
-        D, I = index.search(queries, k)
+        if task == 'task2':
+            D, I = index.graph(queries, k)
+        else:
+            D, I = index.search(queries, k)
         if task[:5] == 'task2':
             pass
             #I += (I == np.arange(I.shape[0])[:, None]) * 1000000000
