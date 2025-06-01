@@ -4,15 +4,17 @@
 // Class for bit-wise write operations
 class BitWriter {
 private:
-    // Binary data buffer
-    std::vector<uint8_t> binaryData;
+    // External buffer pointer and capacity
+    uint8_t* buffer;
+    size_t capacity;
+    size_t currentPos;
     
     // Current bit buffer and count
     uint64_t bitBuffer;
     int bitCount;
     
 public:
-    BitWriter() : bitBuffer(0), bitCount(0) {}
+    BitWriter(uint8_t* buf, size_t cap) : buffer(buf), capacity(cap), currentPos(0), bitBuffer(0), bitCount(0) {}
     
     // Write bits to buffer sequentially
     void writeBits(uint64_t value, uint32_t bitCount) {
@@ -25,39 +27,44 @@ public:
         
         // Output as bytes if 8 or more bits available
         while (8 <= this->bitCount) {
-            binaryData.push_back(uint8_t(bitBuffer));
+            assert(currentPos < capacity && "BitWriter buffer overflow");
+            buffer[currentPos++] = uint8_t(bitBuffer);
             bitBuffer >>= 8;
             this->bitCount -= 8;
         }
     }
     
     // Finalization - flush remaining data
-    void finalizeBuffer() {
+    size_t finalizeBuffer() {
         // Output remaining bits
         if (bitCount > 0) {
-            binaryData.push_back(uint8_t(bitBuffer));
+            assert(currentPos < capacity && "BitWriter buffer overflow");
+            buffer[currentPos++] = uint8_t(bitBuffer);
             bitBuffer = 0;  // Reset bit buffer
             bitCount = 0;   // Reset bit count
         }
         
         // Add fixed 8 bytes of zeros
         for (int i = 0; i < 8; i++) {
-            binaryData.push_back(0);
+            assert(currentPos < capacity && "BitWriter buffer overflow");
+            buffer[currentPos++] = 0;
         }
+        
+        return currentPos;
     }
     
-    // Return pointer to buffer data (lifetime depends on BitWriter)
+    // Return pointer to buffer data
     const uint8_t* data() const {
-        return binaryData.data();
+        return buffer;
     }
     
-    // Buffer size
+    // Buffer size written so far
     size_t size() const {
-        return binaryData.size();
+        return currentPos;
     }
 
     size_t getOffset() const {
-        return binaryData.size() * 8 + bitCount;
+        return currentPos * 8 + bitCount;
     }
 };
 

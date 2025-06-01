@@ -2,8 +2,8 @@
 #define HTREE_HPP
 
 
-// File-mapped HilbertTree structure
-// Placed directly on mmap'ed memory, with data following the structure
+// HilbertTree structure
+// Memory layout: header followed by data
 struct HilbertTree {
     // Tree data size (excluding header)
     uint64_t dataSize;

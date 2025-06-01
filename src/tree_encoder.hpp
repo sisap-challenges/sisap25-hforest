@@ -20,7 +20,9 @@ private:
     int nodeRightOffset;
     uint64_t pointIdOffset;  // Point ID offset (point ID information follows internal node information)
     
-    BitWriter bitWriter;
+    // Encoded data will be stored here
+    uint8_t* encodedData = nullptr;
+    size_t encodedSize = 0;
 
 public:
     TreeEncoder(const std::vector<int>& nodes, const std::vector<int>& info, const std::vector<int>& points, int depth, int dims)
@@ -80,9 +82,28 @@ public:
         pointIdOffset = 0;
     }
     
+    ~TreeEncoder() {
+        if (encodedData != nullptr) {
+            free(encodedData);
+        }
+    }
+    
     // Encode tree structure to binary data
     void encode() {
-        bitWriter = BitWriter();
+        // Calculate required buffer size
+        size_t headerSize = HilbertTree::getHeaderSize();
+        size_t internalNodeBits = nodeInfo.size() * nodeBits;
+        size_t leafNodeBits = sortedPoints.size() * pointIdBits;
+        size_t totalBits = internalNodeBits + leafNodeBits;
+        size_t dataSize = ((totalBits + 7) >> 3) + 16;  // Add extra bytes for finalization
+        encodedSize = headerSize + dataSize;
+        
+        // Allocate buffer for header + data
+        encodedData = (uint8_t*)malloc(encodedSize);
+        assert(encodedData != nullptr && "Failed to allocate memory for encoded tree data");
+        
+        // BitWriter writes to data portion (after header)
+        BitWriter bitWriter(encodedData + headerSize, dataSize);
         
         // Encode internal node information
         for (size_t nodeId = 0; nodeId < nodeInfo.size(); nodeId++) {
@@ -113,42 +134,30 @@ public:
     }
     
     // Write encoded binary data and parameters to memory for mmap
-    // New version: Create memory-mapped file and construct HilbertTree in-place
+    // New version: Create file and return allocated HilbertTree
     HilbertTree* createTreeFile(const std::string& filePath) {
         // Encode if not already encoded
-        if (bitWriter.size() == 0) {
+        if (encodedData == nullptr) {
             encode();
         }
         
-        // Create file (overwrite if exists)
-        int fd = open(filePath.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        assert(fd != -1 && "Failed to create file");
-        
-        // Set file size (header + data)
-        size_t headerSize = HilbertTree::getHeaderSize();
-        size_t dataSize = bitWriter.size();
-        size_t totalSize = headerSize + dataSize;
-        
-        // Set file size
-        int truncResult __attribute__((unused)) = ftruncate(fd, totalSize);
-        assert(truncResult == 0 && "Failed to set file size");
-        
-        // Create memory map
-        void* mmapAddr = mmap(NULL, totalSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        assert(mmapAddr != MAP_FAILED && "Failed to create memory map");
-        
-        // File can be closed after mapping (map remains valid)
-        close(fd);
-        
         // Initialize HilbertTree header
-        HilbertTree::initialize(mmapAddr, dataSize, nodeBits, nodeBitPosBits, nodeLRBits, pointIdOffset, pointIdBits);
+        HilbertTree* tree = (HilbertTree*)encodedData;
+        size_t dataSize = encodedSize - HilbertTree::getHeaderSize();
+        HilbertTree::initialize(tree, dataSize, nodeBits, nodeBitPosBits, nodeLRBits, pointIdOffset, pointIdBits);
         
-        // Copy data part
-        HilbertTree* tree = (HilbertTree*)mmapAddr;
-        memcpy(tree->getDataPtr(), bitWriter.data(), dataSize);
+        // Write to file
+        FILE* fp = fopen(filePath.c_str(), "wb");
+        assert(fp != nullptr && "Failed to create file");
         
-        // Sync memory with disk
-        msync(mmapAddr, totalSize, MS_SYNC);
+        size_t written __attribute__((unused)) = fwrite(encodedData, 1, encodedSize, fp);
+        assert(written == encodedSize && "Failed to write complete tree to file");
+        
+        fclose(fp);
+        
+        // Transfer ownership to caller
+        encodedData = nullptr;
+        encodedSize = 0;
         
         return tree;
     }
@@ -161,39 +170,45 @@ public:
             return nullptr;  // File doesn't exist
         }
         
-        // Open file
-        int fd = open(filePath.c_str(), O_RDONLY);
-        if (fd == -1) {
-            return nullptr;  // Failed to open file
-        }
-        
-        // Memory map the file
-        void* mmapAddr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
-        
-        if (mmapAddr == MAP_FAILED) {
-            return nullptr;  // Failed to map file
-        }
-        
         // Check header size
         if (st.st_size < (long)HilbertTree::getHeaderSize()) {
-            munmap(mmapAddr, st.st_size);
             return nullptr;  // Invalid file size
         }
         
+        // Open file
+        FILE* fp = fopen(filePath.c_str(), "rb");
+        if (fp == nullptr) {
+            return nullptr;  // Failed to open file
+        }
+        
+        // Allocate memory for entire file
+        void* memory = malloc(st.st_size);
+        if (memory == nullptr) {
+            fclose(fp);
+            return nullptr;  // Failed to allocate memory
+        }
+        
+        // Read file content
+        size_t bytesRead = fread(memory, 1, st.st_size, fp);
+        fclose(fp);
+        
+        if (bytesRead != (size_t)st.st_size) {
+            free(memory);
+            return nullptr;  // Failed to read complete file
+        }
+        
         // Return as HilbertTree pointer
-        return (HilbertTree*)mmapAddr;
+        return (HilbertTree*)memory;
     }
     
-    // Unmap memory
+    // Free allocated memory
     static void unmapTree(HilbertTree* tree) {
         if (tree) {
-            size_t totalSize = tree->getTotalSize();
-            munmap((void*)tree, totalSize);
+            free((void*)tree);
         }
     }
     size_t getDataSize() const {
-        return bitWriter.size();
+        return encodedSize - HilbertTree::getHeaderSize();
     }
     
     // Get encoder parameters
