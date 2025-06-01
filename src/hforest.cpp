@@ -37,6 +37,8 @@ namespace py = pybind11;
 
 using Candidate = std::tuple<int, int>;
 using Candidates = fast_vector<Candidate>;
+using FloatCandidate = std::tuple<float, int>;
+using FloatCandidates = fast_vector<FloatCandidate>;
 
 #include "timing.hpp"
 #include "progress_bar.hpp"
@@ -48,16 +50,11 @@ using Candidates = fast_vector<Candidate>;
 #include "tree_encoder.hpp"
 #include "hsearch.hpp"
 
-// Bidirectional mapping between original IDs and pre-Hilbert sorted indices
-struct IDMapping {
-    std::vector<int> id_to_preidx;
-    std::vector<int> preidx_to_id;
-};
 
 class HilbertForest {
 private:
     int dimensions = -1;
-    int bitDepth = 4;          // Bit depth for quantization (e.g., 3 for 3-bit, 8 for 8-bit)
+    int bitDepth = 5;          // Bit depth for quantization (e.g., 3 for 3-bit, 8 for 8-bit)
     int ntrees_total;          // Total number of trees built during training
     int ntrees;                // Number of trees to use during search (can be <= ntrees_total)
     int odd_candidates = 11;   // Number of candidates for leaf nodes with odd size
@@ -72,14 +69,18 @@ private:
     
     // Quantized data storage (in pre-Hilbert sort order)
     uint8_t* points_data = nullptr;
-    void* points_memory = nullptr;
+    size_t points_mmap_size = 0;
+    
+    // Compressed data storage
+    uint8_t* compressed_points_data = nullptr;
+    
     int num_points = 0;
     
     // Sketch data storage (in pre-Hilbert sort order)
     uint8_t* sketches_data = nullptr;
     void* sketches_memory = nullptr;
     
-    IDMapping id_mapping;
+    std::vector<int> preidx_to_id;
     ForestTiming timing;
     
     struct TreeInfo {
@@ -105,12 +106,18 @@ private:
         }
         trees.clear();
         
-        if (points_memory != nullptr) {
-            free(points_memory);
-            points_memory = nullptr;
+        if (points_data != nullptr) {
+            munmap(points_data, points_mmap_size);
             points_data = nullptr;
-            num_points = 0;
+            points_mmap_size = 0;
         }
+        
+        if (compressed_points_data != nullptr) {
+            free(compressed_points_data);
+            compressed_points_data = nullptr;
+        }
+        
+        num_points = 0;
         
         if (sketches_memory != nullptr) {
             free(sketches_memory);
@@ -129,7 +136,7 @@ private:
     }
     
 public:
-    HilbertForest(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 4)
+    HilbertForest(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5)
         : bitDepth(bit_depth), ntrees_total(ntrees), ntrees(ntrees), leaf_size(leaf_size),
           verbose(verbose_level), timing(), dbPath(db_path) {
         assert(leaf_size > 0);
@@ -174,20 +181,16 @@ public:
 
         this->num_points = num_points;
         
-        // Prepare BitWriter for all data
-        BitWriter dataWriter;
-        
-        
-        id_mapping.id_to_preidx.resize(num_points);
-        id_mapping.preidx_to_id.resize(num_points);
-        
-        std::vector<int> all_points;
-        all_points.reserve(num_points);
-        
         py::gil_scoped_acquire acquire;
+        
+        // Allocate buffer for temporary points data
+        const size_t temp_data_size = (((size_t)num_points * dimensions * bitDepth + 7) >> 3) + 16;
+        uint8_t* temp_points_data = (uint8_t*)malloc(temp_data_size);
+        assert(temp_points_data != nullptr && "Failed to allocate memory for temporary points data");
         
         {
             ProgressBar progress_bar(num_points, "Quantizing data points", verbose);
+            BitWriter dataWriter(temp_points_data, temp_data_size);
             double data_fetch_time = 0.0;
             double numpy_convert_time = 0.0;
             double point_transform_time = 0.0;
@@ -215,16 +218,15 @@ public:
                     // Transform batch to bit-packed format
                     BitQuantizer::transformToBits(ptr, dataWriter, current_batch, dimensions, quantization_rate, bitDepth);
                     
-                    // Add indices for all points in batch
-                    for (int i = 0; i < current_batch; i++) {
-                        all_points.push_back(start_idx + i);
-                    }
                 }
                 
                 progress_bar.update(current_batch);
             }
             
             progress_bar.complete();
+            
+            // Finalize bit-packed data
+            dataWriter.finalizeBuffer();
             
             // Display timing results
             if (verbose) {
@@ -234,56 +236,68 @@ public:
             }
         }
         
-        // Finalize bit-packed data
-        dataWriter.finalizeBuffer();
-        
-        // Create temporary buffer for bit-packed data
-        size_t temp_data_size = dataWriter.size();
-        uint8_t* temp_points_data = (uint8_t*)malloc(temp_data_size);
-        assert(temp_points_data != nullptr && "Failed to allocate memory for temporary points data");
-        std::memcpy(temp_points_data, dataWriter.data(), temp_data_size);
-        
         // Pre-Hilbert sort
         {
             ProgressBar progress_bar(1, "Pre-Hilbert sort", verbose);
+            
+            // Initialize preidx_to_id with original indices
+            preidx_to_id.resize(num_points);
+            for (int i = 0; i < num_points; i++) {
+                preidx_to_id[i] = i;
+            }
+            
             std::vector<int> pre_hilbert_axes(dimensions);
             for (int i = 0; i < dimensions; i++) {
                 pre_hilbert_axes[i] = i;
             }
             HilbertSort pre_sorter(pre_hilbert_axes, bitDepth, rng, temp_points_data, dimensions, 1, laneCount);
-            pre_sorter.sort(all_points);
+            pre_sorter.sort(preidx_to_id);
             progress_bar.complete();
         }
         
-        // Create ID <-> PRE_IDX mapping based on sort results
-        for (int pre_idx = 0; pre_idx < num_points; pre_idx++) {
-            int original_id = all_points[pre_idx];
-            id_mapping.preidx_to_id[pre_idx] = original_id;
-            id_mapping.id_to_preidx[original_id] = pre_idx;
-        }
+        // Create points_data_{db_path}.bin file
+        std::string points_file_path = "points_data_" + dbPath + ".bin";
         
         // Create new memory layout based on pre-Hilbert sort order
-        // For bit-packed data, we need to reorder the data
-        BitWriter sortedDataWriter;
+        const size_t sorted_data_size = (((size_t)num_points * dimensions * bitDepth + 7) >> 3) + 16;
         
-        // Process points in PRE_IDX order
-        for (int pre_idx = 0; pre_idx < num_points; pre_idx++) {
-            int original_id = id_mapping.preidx_to_id[pre_idx];
+        // Open file for writing (create or truncate)
+        int fd = open(points_file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        assert(fd != -1 && "Failed to create points_data file");
+        
+        // Set file size
+        int truncResult __attribute__((unused)) = ftruncate(fd, sorted_data_size);
+        assert(truncResult == 0 && "Failed to set file size");
+        
+        // Memory map the file
+        points_data = (uint8_t*)mmap(NULL, sorted_data_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        assert(points_data != MAP_FAILED && "Failed to mmap points_data file");
+        points_mmap_size = sorted_data_size;
+        
+        {
+            BitWriter sortedDataWriter(points_data, sorted_data_size);
             
-            // Copy bit-packed data for this point
-            for (int d = 0; d < dimensions; d++) {
-                size_t bitPos = BitQuantizer::calculateBitPosition(original_id, d, dimensions, bitDepth);
-                uint64_t value = readBits(temp_points_data, bitPos, bitDepth);
-                sortedDataWriter.writeBits(value, bitDepth);
+            // Process points in PRE_IDX order
+            for (int pre_idx = 0; pre_idx < num_points; pre_idx++) {
+                int original_id = preidx_to_id[pre_idx];
+                
+                // Copy bit-packed data for this point
+                for (int d = 0; d < dimensions; d++) {
+                    size_t bitPos = BitQuantizer::calculateBitPosition(original_id, d, dimensions, bitDepth);
+                    uint64_t value = readBits(temp_points_data, bitPos, bitDepth);
+                    sortedDataWriter.writeBits(value, bitDepth);
+                }
             }
+            
+            // Finalize sorted data
+            sortedDataWriter.finalizeBuffer();
         }
         
-        // Finalize sorted data
-        sortedDataWriter.finalizeBuffer();
-        size_t sorted_data_size = sortedDataWriter.size();
-        points_data = (uint8_t*)malloc(sorted_data_size);
-        assert(points_data != nullptr && "Failed to allocate memory for points data");
-        std::memcpy(points_data, sortedDataWriter.data(), sorted_data_size);
+        // Sync to disk
+        msync(points_data, sorted_data_size, MS_SYNC);
+        
+        // Close file descriptor (mmap remains valid)
+        close(fd);
         
         // Release temporary buffer
         free(temp_points_data);
@@ -390,23 +404,8 @@ public:
                 TreeEncoder encoder(treeNodes, nodeInfo, sorted_points, bitDepth, dimensions);
                 encoder.encode();
                 
-                // Create temporary file name
-                std::string temp_tree_file_path = dbPath + "/temp_tree_" + std::to_string(tree_idx) + "_" + 
-                                                 std::to_string(std::random_device{}()) + ".bin.tmp";
-                
-                // Save tree to temporary file and mmap it
-                HilbertTree* temp_tree = encoder.createTreeFile(temp_tree_file_path);
-                
-                // Unmap temporary file
-                TreeEncoder::unmapTree(temp_tree);
-                
-                // Rename temporary file to formal file name
-                int rename_result __attribute__((unused)) = rename(temp_tree_file_path.c_str(), tree_file_path.c_str());
-                assert(rename_result == 0 && "Failed to rename temporary file");
-                
-                // Load formal file with mmap for reading
-                trees[tree_idx].tree = TreeEncoder::loadTreeFile(tree_file_path);
-                assert(trees[tree_idx].tree != nullptr && "Failed to load formal file");
+                // Create tree in memory and save to file
+                trees[tree_idx].tree = encoder.createTreeFile(tree_file_path);
             }
 
             tree_build_bar.update();
@@ -427,17 +426,20 @@ public:
         {
             ProgressBar progress_bar(1, "Compressing database points", verbose);
             
-            BitWriter compressedWriter;
+            // Calculate compressed size and allocate memory
+            const size_t compressed_size = (((size_t)num_points * dimensions * (bitDepth - 1) + 7) >> 3) + 16;
+            compressed_points_data = (uint8_t*)malloc(compressed_size);
+            assert(compressed_points_data != nullptr && "Failed to allocate memory for compressed points data");
+            
+            // Write compressed data
+            BitWriter compressedWriter(compressed_points_data, compressed_size);
             BitQuantizer::compressBitPackedData(points_data, compressedWriter, num_points, dimensions, bitDepth);
             compressedWriter.finalizeBuffer();
             
-            // Replace original points_data with compressed version
-            free(points_memory);
-            size_t compressed_size = compressedWriter.size();
-            points_memory = malloc(compressed_size + 8);
-            assert(points_memory != nullptr && "Failed to allocate memory for compressed points");
-            points_data = (uint8_t*)(void*)(((size_t)points_memory + 7) & ~7);
-            std::memcpy(points_data, compressedWriter.data(), compressed_size);
+            // Unmap original points_data as it's no longer needed
+            munmap(points_data, points_mmap_size);
+            points_data = nullptr;
+            points_mmap_size = 0;
             
             progress_bar.complete();
         }
@@ -541,10 +543,15 @@ public:
         size_t block_size = 65536;
         size_t block_mask = block_size - 1;
         
-        // Pre-allocate quantized queries buffer
+        // Pre-allocate quantized queries buffer (for tree search)
         size_t max_query_data_size = ((size_t)max_batch_queries * dimensions * bitDepth + 7) >> 3;
         uint8_t* quantized_queries = (uint8_t*)malloc(max_query_data_size + 8);
         assert(quantized_queries != nullptr && "Failed to allocate memory for quantized queries");
+        
+        // Pre-allocate scaled float queries buffer (for distance calculation)
+        size_t max_float_query_size = max_batch_queries * dimensions * sizeof(float);
+        float* scaled_queries = (float*)malloc(max_float_query_size);
+        assert(scaled_queries != nullptr && "Failed to allocate memory for scaled queries");
         
         // Pre-allocate query sketches memory
         size_t sketch_bytes = (dimensions + 7) >> 3;
@@ -596,7 +603,7 @@ public:
         work_size += scores_qword_bytes;
 
         size_t filtered_capacity = dist_candidates * (1 + hops + hops);
-        size_t filtered_bytes = sizeof(Candidates) + sizeof(Candidate) * filtered_capacity;
+        size_t filtered_bytes = sizeof(FloatCandidates) + sizeof(FloatCandidate) * filtered_capacity;
         size_t filtered_qword_bytes = (filtered_bytes + 7) & ~7;
         work_size += filtered_qword_bytes;
 
@@ -613,22 +620,26 @@ public:
             std::vector<int> filtered_candidates_per_query(num_queries, 0);
             
             // Quantize all queries once in advance
-            BitWriter queryWriter;
             {
                 ProgressBar progress_bar(1, "Quantizing query points", verbose);
+                BitWriter queryWriter(quantized_queries, max_query_data_size);
                 
                 float* query_ptr = (float*)buf.ptr + (size_t)batch_start * dimensions;
                 
+                // Quantize for tree search
                 BitQuantizer::transformToBits(query_ptr, queryWriter, num_queries, dimensions, quantization_rate, bitDepth);
                 queryWriter.finalizeBuffer();
                 
+                // Also create scaled float version for distance calculation
+                float midpoint = (float)(1LL << (bitDepth - 1));
+                float adjustment = midpoint - 0.5f;
+                size_t total_values = num_queries * dimensions;
+                for (size_t i = 0; i < total_values; i++) {
+                    scaled_queries[i] = query_ptr[i] * quantization_rate + adjustment;
+                }
+                
                 progress_bar.complete();
             }
-            
-            // Copy quantized queries to pre-allocated buffer
-            size_t query_data_size = queryWriter.size();
-            assert(query_data_size <= max_query_data_size && "Query data size exceeds pre-allocated buffer");
-            std::memcpy(quantized_queries, queryWriter.data(), query_data_size);
             
             {
                 ProgressBar progress_bar(1, "Generating query sketches", verbose);
@@ -741,7 +752,7 @@ public:
                     scores.init(scores_capacity);
                     work_base += scores_qword_bytes;
 
-                    Candidates & filtered = *(Candidates*)(void*)work_base;
+                    FloatCandidates & filtered = *(FloatCandidates*)(void*)work_base;
                     filtered.init(filtered_capacity);
                     work_base += filtered_qword_bytes;
                     
@@ -800,9 +811,9 @@ public:
                                     uint8_t* point_sketch = sketches_data + (size_t)pre_idx * sketch_stride;
                                     
                                     // Calculate squared distance using compressed data + sketch
-                                    int distance2 = BitQuantizer::calculateSquaredDistanceCompressed(
-                                        points_data, pre_idx, point_sketch, sketch_stride,
-                                        quantized_queries, q, dimensions, bitDepth, laneCount);
+                                    float distance2 = BitQuantizer::calculateSquaredDistanceCompressed(
+                                        compressed_points_data, pre_idx, point_sketch, sketch_stride,
+                                        scaled_queries, q, dimensions, bitDepth, laneCount);
                                     
                                     // Use squared Euclidean distance as score (smaller is better)
                                     filtered.emplace_back(distance2, pre_idx);
@@ -825,7 +836,7 @@ public:
                             for (int i = 0; i < k; i++) {
                                 d_ptr(batch_start + q, i) = std::get<0>(filtered[i]);
                                 // Convert PRE_IDX to original ID and store
-                                i_ptr(batch_start + q, i) = id_mapping.preidx_to_id[std::get<1>(filtered[i])];
+                                i_ptr(batch_start + q, i) = preidx_to_id[std::get<1>(filtered[i])];
                             }
                         }
                         
@@ -879,6 +890,7 @@ public:
         free(work_memory);
         free(tree_work_memory);
         free(quantized_queries);
+        free(scaled_queries);
         free(query_sketches_memory);
         
         return std::make_tuple(D, I);
@@ -1246,10 +1258,15 @@ public:
         leaf_size = size;
     }
     
+    // Getter for bitDepth (read-only property)
+    int get_bitDepth() const {
+        return bitDepth;
+    }
+    
 };
 
 // Create index
-HilbertForest create_index(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 4) {
+HilbertForest create_index(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5) {
     return HilbertForest(db_path, ntrees, leaf_size, verbose_level, seed, bit_depth);
 }
 
@@ -1263,7 +1280,7 @@ PYBIND11_MODULE(hforest, m) {
              py::arg("leaf_size") = 1,
              py::arg("verbose") = 1,
              py::arg("seed") = -1,
-             py::arg("bit_depth") = 4)
+             py::arg("bit_depth") = 5)
         .def("preload", &HilbertForest::preload, 
              py::arg("data"),
              "Preload dataset and perform quantization and pre-Hilbert sorting")
@@ -1297,6 +1314,7 @@ PYBIND11_MODULE(hforest, m) {
         .def_property("hops",
                      &HilbertForest::get_hops,
                      &HilbertForest::set_hops)
+        .def_property_readonly("bitDepth", &HilbertForest::get_bitDepth)
         .def("get_properties", &HilbertForest::get_properties)
         .def("get_timing_info", &HilbertForest::get_timing_info, 
              "Get detailed timing information");
@@ -1307,6 +1325,6 @@ PYBIND11_MODULE(hforest, m) {
           py::arg("leaf_size") = 1,
           py::arg("verbose") = false,
           py::arg("seed") = -1,
-          py::arg("bit_depth") = 4,
+          py::arg("bit_depth") = 5,
           "Create new HilbertForest index");
 }

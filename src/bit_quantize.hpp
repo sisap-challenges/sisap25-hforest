@@ -122,32 +122,28 @@ public:
         return distance;
     }
     
-    // Calculate squared distance between compressed database point and full query
+    // Calculate squared distance between compressed database point and scaled float query
     // Database point uses (bitWidth-1) bits + MSB from sketch
-    static int calculateSquaredDistanceCompressed(const uint8_t* compressedPointData, size_t pointIndex,
-                                                 const uint8_t* pointSketch, size_t sketchStride,
-                                                 const uint8_t* queryData, size_t queryIndex,
-                                                 int dimensions, int bitWidth, int laneCount) {
-        int distance = 0;
+    static float calculateSquaredDistanceCompressed(const uint8_t* compressedPointData, size_t pointIndex,
+                                                   const uint8_t* pointSketch, size_t sketchStride,
+                                                   const float* scaledQueries, size_t queryIndex,
+                                                   int dimensions, int bitWidth, int laneCount) {
+        float distance = 0.0f;
         int compressedBitWidth = bitWidth - 1;
         uint64_t compressedMask = (1ULL << compressedBitWidth) - 1;
-        uint64_t queryMask = (1ULL << bitWidth) - 1;
         uint64_t msbValue = 1ULL << compressedBitWidth;  // MSB value for reconstruction
+        
+        const float* queryPtr = scaledQueries + queryIndex * dimensions;
         
         int d = 0;
         while (d < dimensions) {
             // Determine how many values to read in this batch
             int batchSize = std::min(laneCount, dimensions - d);
             int compressedBatchBits = batchSize * compressedBitWidth;
-            int queryBatchBits = batchSize * bitWidth;
             
             // Read compressed batch from point data
             size_t pointBitPos = pointIndex * dimensions * compressedBitWidth + d * compressedBitWidth;
             uint64_t pointBatch = readBits(compressedPointData, pointBitPos, compressedBatchBits);
-            
-            // Read batch from query data
-            size_t queryBitPos = calculateBitPosition(queryIndex, d, dimensions, bitWidth);
-            uint64_t queryBatch = readBits(queryData, queryBitPos, queryBatchBits);
             
             // Read MSB batch from sketch (max 57 bits at once)
             uint64_t msbBatch = readBits(pointSketch, d, batchSize);
@@ -161,15 +157,12 @@ public:
                 bool msb = (msbBatch >> i) & 1;
                 int val1 = msb ? (compressedVal | msbValue) : compressedVal;
                 
-                // Get query value
-                int val2 = (int)(queryBatch & queryMask);
-                
-                int diff = val1 - val2;
+                // Calculate squared difference
+                float diff = (float)val1 - queryPtr[d + i];
                 distance += diff * diff;
                 
                 // Shift to next value
                 pointBatch >>= compressedBitWidth;
-                queryBatch >>= bitWidth;
             }
             
             d += batchSize;
