@@ -177,6 +177,93 @@ jobs:
           df
           free
 
+  task2old:
+    name: Task 2 Old
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check space before cleanup
+        run: |
+          df -h
+          free
+      - name: Clean space as per https://github.com/actions/virtual-environments/issues/709
+        run: |
+          sudo rm -rf "/opt/ghc" || true
+          sudo rm -rf "/usr/share/dotnet" || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf "/usr/local/lib/android" || true
+          sudo rm -rf "/usr/local/share/boost" || true
+      - name: Check space checkupoint cleanup
+        run: |
+          df -h
+          free
+      - name: apt-get remove cleanup
+        run: |
+          sudo apt purge -y \
+            ansible* \
+            aria2* \
+            aspnetcore* \
+            azure-cli* \
+            cabal* \
+            clang* \
+            dotnet-* \
+            firefox* \
+            gfortran-* \
+            ghc* \
+            google-chrome-stable* \
+            google-cloud-sdk* \
+            imagemagick* \
+            javascript* \
+            kubectl* \
+            llvm* \
+            mono* \
+            mysql* \
+            nginx* \
+            node* \
+            npm* \
+            nuget* \
+            php* \
+            postgresql* \
+            powershell* \
+            rpm* \
+            ruby* \
+            sqlite3* \
+            subversion \
+            temurin* \
+            tmux* \
+            vim* \
+            yarn*
+          sudo apt-get autoremove -y >/dev/null 2>&1 || true
+          sudo apt-get autoclean -y >/dev/null 2>&1 || true
+      - name: Check space after cleanup
+        run: |
+          df -h
+          free
+      - name: Install Environments
+        run: |
+          python3 -m pip install h5py pybind11
+      - name: Make
+        run: make
+      - name: Check space before download
+        run: |
+          df
+          free
+      - name: Download Task2
+        run: |
+          mkdir data
+          curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/benchmark-dev-gooaq.h5?download=true" -o data/benchmark-dev-gooaq.h5
+          curl -L "https://huggingface.co/datasets/sadit/SISAP2025/resolve/main/allknn-benchmark-dev-gooaq.h5?download=true" -o data/allknn-benchmark-dev-gooaq.h5
+      - name: Check space after download
+        run: |
+          df
+          free
+      - name: Run Task2
+        run: python3 -u sisap2025.py task2old
+      - name: Check space after solutions
+        run: |
+          df
+          free
+
   task1faiss:
     if: ${{ false }}
     name: Task 1 FAISS

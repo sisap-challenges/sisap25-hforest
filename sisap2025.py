@@ -57,7 +57,7 @@ def run(task, verbose_level=1):
     if task[:5] == 'task1':
         dataset = 'pubmed23'
         k = 30
-        need_self_loop_removal = False
+        bit_depth = 4
         
         # Load data (task1 loads all from the same file)
         f_data = h5py.File('data/benchmark-dev-pubmed23.h5', 'r')
@@ -65,23 +65,22 @@ def run(task, verbose_level=1):
         queries = np.array(f_data['otest']['queries'])
         gt_I = np.array(f_data['otest']['knns'])
 
-        ntrees = 400
-        leaf_size = 10
+        leaf_size = 100
         hyper_params = [
-            (ntrees, 400, 401, 301, 2),
-            (ntrees, 400, 401, 300, 2),
-            (ntrees, 240, 241, 301, 2),
-            (ntrees, 240, 241, 300, 2),
-            (200, 840, 841, 301, 2),
-            (200, 840, 841, 300, 2),
-            (100, 3000, 3001, 301, 2),
-            (100, 3000, 3001, 300, 2),
+            (160, 1420, 1421, 370, 2),
+            (160, 1420, 1421, 360, 2), # 73.0064% 12.968sec
+            (160, 1300, 1301, 350, 2),
+            (160, 1300, 1301, 340, 2), # 72.0154% 12.087sec
+            (160, 1200, 1201, 330, 2),
+            (160, 1200, 1201, 320, 2), # 71.0912% 11.341sec
+            (160, 1100, 1101, 310, 2),
+            (160, 1100, 1101, 300, 2), # 70.0600% 10.504sec
         ]
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
         k = 16
-        need_self_loop_removal = True
+        bit_depth = 8
         
         # Load data (task2 loads from two files)
         f_data = h5py.File('data/benchmark-dev-gooaq.h5', 'r')
@@ -91,22 +90,22 @@ def run(task, verbose_level=1):
         gt_I = np.array(f_gt['knns'])
         f_gt.close()
 
-        ntrees = 340
         leaf_size = 10
         hyper_params = [
-            (ntrees, 12, 13, 61, 0),
-            (ntrees, 12, 13, 60, 0),
-            (ntrees, 10, 11, 61, 0),
-            (ntrees, 10, 11, 60, 0),
-            (ntrees, 8, 9, 61, 0),
-            (ntrees, 8, 9, 60, 0),
-            (ntrees, 6, 7, 61, 0),
-            (ntrees, 6, 7, 60, 0)
+            (340, 6, 7, 60, 0), # 80.8418% 109.721sec
+            (400, 6, 7, 60, 0), # 82.7257% 126.354sec
+            (450, 6, 7, 60, 0), # 83.9927% 142.453sec
+            (500, 6, 7, 60, 0), # 85.0380% 157.165sec
+            (550, 6, 7, 60, 0), # 85.9742% 171.756sec
+            (600, 6, 7, 60, 0), # 86.7744% 185.8142sec
         ]
+        if task == 'task2':
+            hyper_params = hyper_params[:1]
+    ntrees = max(hyper_param[0] for hyper_param in hyper_params)
 
     # Create index
     print("Creating index...")
-    index = hforest.create_index(db_path=task[:5], ntrees=ntrees, leaf_size=leaf_size, verbose=verbose_level)
+    index = hforest.create_index(db_path=task[:5], ntrees=ntrees, leaf_size=leaf_size, verbose=verbose_level, bit_depth=bit_depth)
     
     # Build index
     start_time = time.time()
@@ -142,7 +141,7 @@ def run(task, verbose_level=1):
     if sys.stdin.isatty():
         hyper_params = gen_hyper_params(ntrees if task != 'task2' else 10000, hyper_params[-1])
     for search_trees, even, odd, dist, hops in hyper_params:
-        print(f"Starting search on {queries.shape} with ntrees={search_trees}")
+        print(f"Starting search on {queries.shape} with ntrees={search_trees}, bitDepth={bit_depth}")
         start = time.time()
         index.ntrees = search_trees     # Number of trees to use
         index.even_candidates = even    # Candidates for even-level nodes
@@ -173,16 +172,20 @@ def run(task, verbose_level=1):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='HilbertForest approximate nearest neighbor search example')
-    parser.add_argument('task', choices=['task1', 'task2', 'task1wf'],
-                        help='Task type to execute (task1, task2, task1wf)')
+    parser.add_argument('task', choices=['task1', 'task2', 'task1wf', 'task2old'],
+                        help='Task type to execute (task1, task2, task1wf, task2old)')
     
-    verbosity_group = parser.add_mutually_exclusive_group()
-    verbosity_group.add_argument(
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Show detailed progress (verbose_level=2)'
     )
-    verbosity_group.add_argument(
+    parser.add_argument(
+        '--concise',
+        action='store_true',
+        help='Show standard progress (verbose_level=1)'
+    )
+    parser.add_argument(
         '--silent',
         action='store_true',
         help='Show minimal output only (verbose_level=0)'
@@ -190,11 +193,13 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Set verbose level: silent=0, normal=1, verbose=2
-    verbose_level = 1  # Default value
-    if args.verbose:
-        verbose_level = 2
-    elif args.silent:
-        verbose_level = 0
+    # Set verbose level with priority: silent > verbose > concise
+    verbose_level = 0  # Default value (silent)
+    if args.silent:
+        verbose_level = 0  # Highest priority
+    elif args.verbose:
+        verbose_level = 2  # Second priority
+    elif args.concise:
+        verbose_level = 1  # Lowest priority
     
     run(args.task, verbose_level)
