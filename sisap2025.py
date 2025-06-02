@@ -179,14 +179,15 @@ def run(task, verbose_level, args):
         index.dist_candidates = dist    # Number of candidates for distance calculation
         index.hops = hops               # Search range for neighboring points (pre_idx ±hops)
         if fitted:
-            D, I = index.search(queries, k)
+            if task[:5] == 'task2':
+                D, I = index.search(queries, k + 1)
+                I += (I == np.arange(I.shape[0])[:, None]) * 1000000000
+                I.sort()
+                I = I[:, :k]
+            else:
+                D, I = index.search(queries, k)
         else:
             D, I = index.graph(queries, k, include_self=False)
-        if task[:5] == 'task2':
-            pass
-            #I += (I == np.arange(I.shape[0])[:, None]) * 1000000000
-            #I.sort()
-            #I = I[:, :k-1]
         I = I + 1 # Convert from 0-indexed to 1-indexed to match groundtruth
         # The +1 conversion should be included in contest timing measurement
         elapsed_search = time.time() - start
