@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -80,6 +81,9 @@ private:
     uint8_t* sketches_data = nullptr;
     void* sketches_memory = nullptr;
     
+    // Temporary file path for mmap
+    std::string temp_file_path;
+    
     std::vector<int> preidx_to_id;
     ForestTiming timing;
     
@@ -100,17 +104,32 @@ private:
     std::string dbPath = "db";
     std::mt19937 rng;
     
+    // Helper method to release mmap'ed points data and remove temporary file
+    void releasePointsData() {
+        if (points_data != nullptr) {
+            munmap(points_data, points_mmap_size);
+            points_data = nullptr;
+            points_mmap_size = 0;
+            
+            // Remove temporary file if it exists
+            if (!temp_file_path.empty()) {
+                if (verbose >= 2) {
+                    std::cerr << "Removing temporary file: " << temp_file_path << std::endl;
+                }
+                unlink(temp_file_path.c_str());
+                temp_file_path.clear();
+            }
+        }
+    }
+    
     void clearTrees() {
         for (auto& tree_info : trees) {
             tree_info.clear();
         }
         trees.clear();
         
-        if (points_data != nullptr) {
-            munmap(points_data, points_mmap_size);
-            points_data = nullptr;
-            points_mmap_size = 0;
-        }
+        // Release mmap'ed points data and remove temporary file
+        releasePointsData();
         
         if (compressed_points_data != nullptr) {
             free(compressed_points_data);
@@ -125,7 +144,30 @@ private:
         }
     }
     
+    // Create temporary file for mmap and return open file descriptor
+    std::pair<std::string, int> createTempFile(size_t size) {
+        // Generate unique temporary file name
+        char temp_path[] = "/tmp/hforest_points_XXXXXX";
+        int fd = mkstemp(temp_path);
+        assert(fd != -1 && "Failed to create temporary file");
+        
+        // Set file size
+        int truncResult __attribute__((unused)) = ftruncate(fd, size);
+        assert(truncResult == 0 && "Failed to set temporary file size");
+        
+        if (verbose >= 2) {
+            std::cerr << "Created temporary file: " << temp_path << std::endl;
+        }
+        
+        // Return both the path and the file descriptor
+        return std::make_pair(std::string(temp_path), fd);
+    }
+    
     void ensureDbDirectory() {
+        if (dbPath.empty()) {
+            // Skip directory creation if dbPath is empty
+            return;
+        }
         struct stat st;
         if (stat(dbPath.c_str(), &st) != 0) {
             int result __attribute__((unused)) = mkdir(dbPath.c_str(), 0755);
@@ -136,7 +178,7 @@ private:
     }
     
 public:
-    HilbertForest(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5)
+    HilbertForest(const std::string& db_path = "", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5)
         : bitDepth(bit_depth), ntrees_total(ntrees), ntrees(ntrees), leaf_size(leaf_size),
           verbose(verbose_level), timing(), dbPath(db_path) {
         assert(leaf_size > 0);
@@ -153,6 +195,15 @@ public:
 
     ~HilbertForest() {
         clearTrees();
+        
+        // Extra safety check to ensure temporary file is removed
+        if (!temp_file_path.empty()) {
+            if (verbose >= 2) {
+                std::cerr << "Removing temporary file in destructor: " << temp_file_path << std::endl;
+            }
+            unlink(temp_file_path.c_str());
+            temp_file_path.clear();
+        }
     }
 
     // Preload data and complete quantization and pre-Hilbert sorting
@@ -255,19 +306,13 @@ public:
             progress_bar.complete();
         }
         
-        // Create points_data_{db_path}.bin file
-        std::string points_file_path = "points_data_" + dbPath + ".bin";
-        
         // Create new memory layout based on pre-Hilbert sort order
         const size_t sorted_data_size = (((size_t)num_points * dimensions * bitDepth + 7) >> 3) + 16;
         
-        // Open file for writing (create or truncate)
-        int fd = open(points_file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        assert(fd != -1 && "Failed to create points_data file");
-        
-        // Set file size
-        int truncResult __attribute__((unused)) = ftruncate(fd, sorted_data_size);
-        assert(truncResult == 0 && "Failed to set file size");
+        // Create temporary file and get file descriptor
+        std::pair<std::string, int> temp_file_info = createTempFile(sorted_data_size);
+        temp_file_path = temp_file_info.first;
+        int fd = temp_file_info.second;
         
         // Memory map the file
         points_data = (uint8_t*)mmap(NULL, sorted_data_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -275,6 +320,7 @@ public:
         points_mmap_size = sorted_data_size;
         
         {
+            ProgressBar progress_bar(1, "Relocating data points", verbose);
             BitWriter sortedDataWriter(points_data, sorted_data_size);
             
             // Process points in PRE_IDX order
@@ -291,16 +337,18 @@ public:
             
             // Finalize sorted data
             sortedDataWriter.finalizeBuffer();
+
+            // Sync to disk
+            msync(points_data, sorted_data_size, MS_SYNC);
+            
+            // Close file descriptor (mmap remains valid)
+            close(fd);
+            
+            // Release temporary buffer
+            free(temp_points_data);
+
+            progress_bar.complete();
         }
-        
-        // Sync to disk
-        msync(points_data, sorted_data_size, MS_SYNC);
-        
-        // Close file descriptor (mmap remains valid)
-        close(fd);
-        
-        // Release temporary buffer
-        free(temp_points_data);
         
         // Generate sketches from quantized data (stored in PRE_IDX order)
         {
@@ -352,11 +400,15 @@ public:
         sorted_points.reserve(num_points);
         
         for (int tree_idx = 0; tree_idx < ntrees_total; tree_idx++) {
-            // Create formal tree file path
-            std::string tree_file_path = dbPath + "/tree_" + std::to_string(tree_idx) + ".bin";
+            // Create formal tree file path only if dbPath is not empty
+            std::string tree_file_path;
+            HilbertTree* existing_tree = nullptr;
             
-            // First check for existing file
-            HilbertTree* existing_tree = TreeEncoder::loadTreeFile(tree_file_path);
+            if (!dbPath.empty()) {
+                tree_file_path = dbPath + "/tree_" + std::to_string(tree_idx) + ".bin";
+                // Check for existing file
+                existing_tree = TreeEncoder::loadTreeFile(tree_file_path);
+            }
             
             if (existing_tree != nullptr) {
                 // If existing tree file found, load it
@@ -366,7 +418,7 @@ public:
                 size_t estimated_nodes = existing_tree->pointIdOffset / existing_tree->nodeBits;
                 total_node_count += estimated_nodes;
             } else {
-                // If tree file not found, create new one
+                // If tree file not found or dbPath is empty, create new one
                 
                 sorted_points.clear();
                 
@@ -404,8 +456,8 @@ public:
                 TreeEncoder encoder(treeNodes, nodeInfo, sorted_points, bitDepth, dimensions);
                 encoder.encode();
                 
-                // Create tree in memory and save to file
-                trees[tree_idx].tree = encoder.createTreeFile(tree_file_path);
+                // Create tree (saves to file if tree_file_path is not empty)
+                trees[tree_idx].tree = encoder.createTree(tree_file_path);
             }
 
             tree_build_bar.update();
@@ -436,13 +488,10 @@ public:
             BitQuantizer::compressBitPackedData(points_data, compressedWriter, num_points, dimensions, bitDepth);
             compressedWriter.finalizeBuffer();
             
-            // Unmap original points_data as it's no longer needed
-            munmap(points_data, points_mmap_size);
-            points_data = nullptr;
-            points_mmap_size = 0;
-            
             progress_bar.complete();
         }
+        // Unmap original points_data as it's no longer needed and remove temporary file
+        releasePointsData();
     }
     
     // Get whether trained or not
@@ -897,7 +946,7 @@ public:
     }
     
     // Graph construction: build graph from points themselves
-    std::tuple<py::array_t<float>, py::array_t<int>> graph(py::array_t<float> points, int k) {
+    std::tuple<py::array_t<float>, py::array_t<int>> graph(py::array_t<float> points, int k, bool include_self = false) {
         timing.reset();
         
         // Verify point dimensions
@@ -1006,7 +1055,7 @@ public:
         uint8_t* indices_base = (uint8_t*)((size_t(indices_memory) + cache_line_mask) & ~cache_line_mask);
         
         // Allocate memory for rankings (one per point) - using fast_vector<uint32_t> for packed values
-        size_t ranking_capacity = dist_candidates * 4;  // 4x buffer for duplicate handling
+        size_t ranking_capacity = dist_candidates * 2;  // 2x buffer for duplicate handling
         size_t ranking_bytes = sizeof(fast_vector<uint32_t>) + sizeof(uint32_t) * ranking_capacity;
         size_t ranking_aligned_bytes = (ranking_bytes + cache_line_mask) & ~cache_line_mask;
         void* rankings_memory = malloc(ranking_aligned_bytes * num_points + cache_line_size);
@@ -1017,17 +1066,19 @@ public:
         std::vector<std::vector<int>> thread_shuffled_axes(num_threads);
         std::vector<std::mt19937> thread_rngs(num_threads);
         
-        // Initialize all rankings
+        // Initialize all rankings(lower 24 bits for ID)
+        assert(num_points <= 0x1000000);
         for (int i = 0; i < num_points; i++) {
             fast_vector<uint32_t>& ranking = *(fast_vector<uint32_t>*)(rankings + i * ranking_aligned_bytes);
             ranking.init(ranking_capacity);
-            // *** IMPORTANT: Contest requires including self in k-NN results ***
-            // Add self with distance 0 (packed as: 0 << 23 | i)
-            ranking.emplace_back(i);
+            if (include_self) {
+                // Add self with distance 0 (packed as: 0 << 24 | i)
+                ranking.emplace_back(i);
+            }
         }
         
         // Threshold tracking for each point
-        std::vector<uint32_t> thresholds(num_points, 0xFFFFFFFF);  // Max value initially
+        std::vector<uint32_t> thresholds(num_points, 256);  // Max value initially
         
         // Generate base seed for thread RNGs
         unsigned int base_seed = rng();
@@ -1106,12 +1157,14 @@ public:
                                 uint8_t* neighbor_sketch = sketches_data + neighbor_id * sketch_qword_bytes;
                                 uint32_t hamming_distance = SketchUtils::hammingDistance(point_sketch, neighbor_sketch, sketch_bytes, dimensions);
                                 
-                                // Pack hamming_distance (9 bits) and neighbor_id (23 bits) into single uint32_t
-                                // Upper 9 bits for distance, lower 23 bits for ID
-                                uint32_t packed_value = (hamming_distance << 23) | (neighbor_id & 0x7FFFFF);
-                                
                                 // Check threshold first
-                                if (packed_value < thresholds[point_id]) {
+                                if (hamming_distance < thresholds[point_id]) {
+                                    // Pack hamming_distance (8 bits) and neighbor_id (24 bits) into single uint32_t
+                                    // Upper 8 bits for distance, lower 24 bits for ID
+                                    assert(0<= neighbor_id && neighbor_id <= 0xFFFFFF);
+                                    assert(hamming_distance < 256);
+                                    uint32_t packed_value = (hamming_distance << 24) | neighbor_id;
+
                                     ranking.emplace_back(packed_value);
                                     
                                     // If buffer is full, sort and remove duplicates
@@ -1125,7 +1178,8 @@ public:
                                         // Update threshold if we have enough unique candidates
                                         if (ranking.size() >= dist_candidates) {
                                             ranking.resize(dist_candidates);
-                                            thresholds[point_id] = ranking.back();
+                                            //Upper 8 bits for distance, lower 24 bits for ID
+                                            thresholds[point_id] = ranking.back() >> 24;
                                         }
                                     }
                                 }
@@ -1143,6 +1197,9 @@ public:
         // Process rankings to compute final k-NN
         ProgressBar final_progress_bar(num_points, "Computing final k-NN", verbose);
         
+        // Progress counter
+        int progress_counter = 0;
+
         #pragma omp parallel num_threads(num_threads)
         {
             int thread_id = omp_get_thread_num();
@@ -1150,9 +1207,6 @@ public:
             // Allocate work memory for distance calculations
             std::vector<std::pair<int, int>> candidates;
             candidates.reserve(dist_candidates);
-            
-            // Progress counter
-            int progress_counter = 0;
             
             #pragma omp for schedule(dynamic)
             for (int point_id = 0; point_id < num_points; point_id++) {
@@ -1173,7 +1227,7 @@ public:
                 
                 for (int i = 0; i < ranking.size(); i++) {
                     uint32_t packed = ranking[i];
-                    uint32_t neighbor_id = packed & 0x7FFFFF;
+                    uint32_t neighbor_id = packed & 0xFFFFFF;
                     
                     // Calculate actual squared distance
                     int distance2 = 0;
@@ -1266,7 +1320,7 @@ public:
 };
 
 // Create index
-HilbertForest create_index(const std::string& db_path = "db", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5) {
+HilbertForest create_index(const std::string& db_path = "", int ntrees = 10, int leaf_size = 1, int verbose_level = 1, int seed = -1, int bit_depth = 5) {
     return HilbertForest(db_path, ntrees, leaf_size, verbose_level, seed, bit_depth);
 }
 
@@ -1275,7 +1329,7 @@ PYBIND11_MODULE(hforest, m) {
     
     py::class_<HilbertForest>(m, "HilbertForest")
         .def(py::init<const std::string&, int, int, int, int, int>(),
-             py::arg("db_path") = "db",
+             py::arg("db_path") = "",
              py::arg("ntrees") = 10,
              py::arg("leaf_size") = 1,
              py::arg("verbose") = 1,
@@ -1294,6 +1348,7 @@ PYBIND11_MODULE(hforest, m) {
         .def("graph", &HilbertForest::graph,
              py::arg("points"),
              py::arg("k") = 10,
+             py::arg("include_self") = false,
              "Build k-NN graph from points themselves")
         .def_property_readonly("is_trained", &HilbertForest::is_trained_getter)
         .def_property("ntrees", 
@@ -1320,7 +1375,7 @@ PYBIND11_MODULE(hforest, m) {
              "Get detailed timing information");
     
     m.def("create_index", &create_index,
-          py::arg("db_path") = "db",
+          py::arg("db_path") = "",
           py::arg("ntrees") = 10,
           py::arg("leaf_size") = 1,
           py::arg("verbose") = false,
