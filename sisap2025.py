@@ -67,6 +67,14 @@ def run(task, verbose_level=1):
 
         leaf_size = 100
         hyper_params = [
+            (160, 2024, 2025, 450, 2),
+            (160, 2024, 2025, 440, 2), # 77.0294% 18.785sec
+            (160, 1920, 1921, 430, 2),
+            (160, 1920, 1921, 420, 2), # 76.0097% 17.005sec
+            (160, 1740, 1741, 410, 2),
+            (160, 1740, 1741, 400, 2), # 75.0791% 15.710sec
+            (160, 1580, 1581, 390, 2),
+            (160, 1580, 1581, 380, 2), # 74.1115% 14.706sec
             (160, 1420, 1421, 370, 2),
             (160, 1420, 1421, 360, 2), # 73.0064% 12.968sec
             (160, 1300, 1301, 350, 2),
@@ -91,24 +99,27 @@ def run(task, verbose_level=1):
         f_gt.close()
 
         leaf_size = 10
-        hyper_params = [
-            (340, 6, 7, 60, 0), # 80.8418% 109.721sec
-            (400, 6, 7, 60, 0), # 82.7257% 126.354sec
-            (450, 6, 7, 60, 0), # 83.9927% 142.453sec
-            (500, 6, 7, 60, 0), # 85.0380% 157.165sec
-            (550, 6, 7, 60, 0), # 85.9742% 171.756sec
-            (600, 6, 7, 60, 0), # 86.7744% 185.8142sec
-        ]
-        if task == 'task2':
-            hyper_params = hyper_params[:1]
+        # SISAP 2025 Python Example's 81.25% == Problem's 80.00%
+        hyper_params_dict = {
+            'task2': (80, 96, 97, 60, 0), # 81.7343%(80.7956%) 51.279sec
+            'task2:85': (112, 106, 107, 75, 0), # 86.4794%(85.5781%) 74.1814sec
+            'task2:90': (160, 130, 131, 100, 0), # 91.1381%(90.5473%) 116.435sec
+            'task2:95': (280, 168, 169, 150, 0), # 95.8289%(95.5509%) 233.765sec
+            'task2:98': (720, 170, 171, 300, 0), # 98.6168%(98.5246%) 611.313sec
+        }
+        if task in hyper_params_dict:
+            hyper_params = [hyper_params_dict[task]]
+        else:
+            hyper_params = [hyper_params_dict[key] for key in hyper_params_dict]
     ntrees = max(hyper_param[0] for hyper_param in hyper_params)
 
     # Create index
     print("Creating index...")
-    index = hforest.create_index(db_path=task[:5], ntrees=ntrees, leaf_size=leaf_size, verbose=verbose_level, bit_depth=bit_depth)
+    index = hforest.create_index(ntrees=ntrees, leaf_size=leaf_size, verbose=verbose_level, bit_depth=bit_depth)
     
     # Build index
     start_time = time.time()
+    fitted = False
     
     if task == 'task1wf':
         # Use preload feature for task1wf
@@ -124,12 +135,14 @@ def run(task, verbose_level=1):
         print("Data source freed, now building index...")
         build_start = time.time()
         index.fit()  # Use preloaded data
+        fitted = True
         build_time = time.time() - build_start
-    elif task == 'task2':
+    elif task == 'task2' or task[:6] == 'task2:':
         build_time = 0
     else:
         # Build index with normal fit
         index.fit(data)
+        fitted = True
         build_time = time.time() - start_time
 
         # Close file
@@ -139,7 +152,7 @@ def run(task, verbose_level=1):
     
     # Accept user input in interactive mode
     if sys.stdin.isatty():
-        hyper_params = gen_hyper_params(ntrees if task != 'task2' else 10000, hyper_params[-1])
+        hyper_params = gen_hyper_params(ntrees if fitted else 10000, hyper_params[-1])
     for search_trees, even, odd, dist, hops in hyper_params:
         print(f"Starting search on {queries.shape} with ntrees={search_trees}, bitDepth={bit_depth}")
         start = time.time()
@@ -148,10 +161,10 @@ def run(task, verbose_level=1):
         index.odd_candidates = odd      # Candidates for odd-level nodes
         index.dist_candidates = dist    # Number of candidates for distance calculation
         index.hops = hops               # Search range for neighboring points (pre_idx ±hops)
-        if task == 'task2':
-            D, I = index.graph(queries, k)
-        else:
+        if fitted:
             D, I = index.search(queries, k)
+        else:
+            D, I = index.graph(queries, k, include_self=True)
         if task[:5] == 'task2':
             pass
             #I += (I == np.arange(I.shape[0])[:, None]) * 1000000000
@@ -168,12 +181,20 @@ def run(task, verbose_level=1):
 
         recall = get_recall(I, gt_I, k)
         print(f"Recall: {recall * 100.0}%")
+        
+        # Calculate True Recall excluding self (for task2)
+        if task[:5] == 'task2':
+            # Since 1 out of k results is the point itself,
+            # (k*recall - 1) / (k - 1) represents the recall when self is excluded
+            true_recall = (k * recall - 1) / (k - 1)
+            print(f"True Recall (self exclusion): {true_recall * 100.0}%")
+            
         print(f"search_ntrees={search_trees}, even={even}, odd={odd}, dist={dist}, hops={hops}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='HilbertForest approximate nearest neighbor search example')
-    parser.add_argument('task', choices=['task1', 'task2', 'task1wf', 'task2old'],
-                        help='Task type to execute (task1, task2, task1wf, task2old)')
+    parser.add_argument('task', choices=['task1', 'task2', 'task1wf', 'task2old', 'task2:85', 'task2:90', 'task2:95', 'task2:98'],
+                        help='Task type to execute (task1, task2, task1wf, task2old, task2:85, task2:90, task2:95, task2:98)')
     
     parser.add_argument(
         '--verbose',

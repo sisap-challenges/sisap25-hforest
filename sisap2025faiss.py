@@ -114,6 +114,13 @@ def run(task):
         recall = get_recall(I, gt_I, k)
         print(f"Recall: {recall * 100.0}%")
 
+        # Calculate True Recall excluding self (for task2)
+        if task[:5] == 'task2':
+            # Since 1 out of k results is the point itself,
+            # (k*recall - 1) / (k - 1) represents the recall when self is excluded
+            true_recall = (k * recall - 1) / (k - 1)
+            print(f"True Recall (self exclusion): {true_recall * 100.0}%")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Example execution of FAISS approximate nearest neighbor search')
     parser.add_argument('task', choices=['task1', 'task2'],
