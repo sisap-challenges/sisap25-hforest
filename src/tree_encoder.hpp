@@ -133,9 +133,8 @@ public:
         bitWriter.finalizeBuffer();
     }
     
-    // Write encoded binary data and parameters to memory for mmap
-    // New version: Create file and return allocated HilbertTree
-    HilbertTree* createTreeFile(const std::string& filePath) {
+    // Create tree and optionally save to file (empty path skips file save)
+    HilbertTree* createTree(const std::string& filePath) {
         // Encode if not already encoded
         if (encodedData == nullptr) {
             encode();
@@ -146,14 +145,16 @@ public:
         size_t dataSize = encodedSize - HilbertTree::getHeaderSize();
         HilbertTree::initialize(tree, dataSize, nodeBits, nodeBitPosBits, nodeLRBits, pointIdOffset, pointIdBits);
         
-        // Write to file
-        FILE* fp = fopen(filePath.c_str(), "wb");
-        assert(fp != nullptr && "Failed to create file");
-        
-        size_t written __attribute__((unused)) = fwrite(encodedData, 1, encodedSize, fp);
-        assert(written == encodedSize && "Failed to write complete tree to file");
-        
-        fclose(fp);
+        // Write to file only if filePath is not empty
+        if (!filePath.empty()) {
+            FILE* fp = fopen(filePath.c_str(), "wb");
+            assert(fp != nullptr && "Failed to create file");
+            
+            size_t written __attribute__((unused)) = fwrite(encodedData, 1, encodedSize, fp);
+            assert(written == encodedSize && "Failed to write complete tree to file");
+            
+            fclose(fp);
+        }
         
         // Transfer ownership to caller
         encodedData = nullptr;
