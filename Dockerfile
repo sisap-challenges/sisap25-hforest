@@ -24,5 +24,8 @@ RUN python3 -m pip install h5py pybind11
 # Python拡張モジュールのビルド
 RUN make
 
+# For SISAP2025
+ENV OMP_NUM_THREADS=8
+
 # コンテナ起動時にPythonを対話的に使えるようにする
 CMD ["bash"]

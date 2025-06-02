@@ -47,7 +47,7 @@ def gen_hyper_params(max_ntrees, example):
                 pass
 
 
-def run(task, verbose_level=1):
+def run(task, verbose_level, args):
     """
     Run search with specified task
     """
@@ -87,7 +87,7 @@ def run(task, verbose_level=1):
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
-        k = 16
+        k = 15
         bit_depth = 8
         
         # Load data (task2 loads from two files)
@@ -98,8 +98,25 @@ def run(task, verbose_level=1):
         gt_I = np.array(f_gt['knns'])
         f_gt.close()
 
+        print(f"Processing ground truth: removing self-references and adjusting to k={k}")
+        gt_process_start = time.time()
+        processed_gt = []
+        for i in range(gt_I.shape[0]):
+            # Create new result row without self-reference
+            nearest_neighbors = []
+            for j in gt_I[i]:
+                if j != i+1:  # Skip self (1-indexed)
+                    nearest_neighbors.append(j)
+                    if len(nearest_neighbors) >= k:
+                        break
+            processed_gt.append(nearest_neighbors)
+        gt_I = np.array(processed_gt)
+        gt_process_end = time.time()
+        print(f"Ground truth processing completed in {gt_process_end - gt_process_start:.3f} seconds")
+
         leaf_size = 10
         # SISAP 2025 Python Example's 81.25% == Problem's 80.00%
+        # Note: Our implementation correctly handles self-exclusion with the modified ground truth
         hyper_params_dict = {
             'task2': (80, 96, 97, 60, 0), # 81.7343%(80.7956%) 51.279sec
             'task2:85': (112, 106, 107, 75, 0), # 86.4794%(85.5781%) 74.1814sec
@@ -150,8 +167,8 @@ def run(task, verbose_level=1):
     
     print(f"Index built in {build_time}s")
     
-    # Accept user input in interactive mode
-    if sys.stdin.isatty():
+    # Accept user input in interactive mode only if the interactive flag is set
+    if args.interactive and sys.stdin.isatty():
         hyper_params = gen_hyper_params(ntrees if fitted else 10000, hyper_params[-1])
     for search_trees, even, odd, dist, hops in hyper_params:
         print(f"Starting search on {queries.shape} with ntrees={search_trees}, bitDepth={bit_depth}")
@@ -164,7 +181,7 @@ def run(task, verbose_level=1):
         if fitted:
             D, I = index.search(queries, k)
         else:
-            D, I = index.graph(queries, k, include_self=True)
+            D, I = index.graph(queries, k, include_self=False)
         if task[:5] == 'task2':
             pass
             #I += (I == np.arange(I.shape[0])[:, None]) * 1000000000
@@ -182,13 +199,6 @@ def run(task, verbose_level=1):
         recall = get_recall(I, gt_I, k)
         print(f"Recall: {recall * 100.0}%")
         
-        # Calculate True Recall excluding self (for task2)
-        if task[:5] == 'task2':
-            # Since 1 out of k results is the point itself,
-            # (k*recall - 1) / (k - 1) represents the recall when self is excluded
-            true_recall = (k * recall - 1) / (k - 1)
-            print(f"True Recall (self exclusion): {true_recall * 100.0}%")
-            
         print(f"search_ntrees={search_trees}, even={even}, odd={odd}, dist={dist}, hops={hops}")
 
 if __name__ == "__main__":
@@ -211,6 +221,11 @@ if __name__ == "__main__":
         action='store_true',
         help='Show minimal output only (verbose_level=0)'
     )
+    parser.add_argument(
+        '--interactive',
+        action='store_true',
+        help='Enable interactive mode to input hyperparameters'
+    )
     
     args = parser.parse_args()
     
@@ -223,4 +238,4 @@ if __name__ == "__main__":
     elif args.concise:
         verbose_level = 1  # Lowest priority
     
-    run(args.task, verbose_level)
+    run(args.task, verbose_level, args)
