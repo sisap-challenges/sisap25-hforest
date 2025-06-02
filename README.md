@@ -2,6 +2,50 @@
 
 HilbertForest is an approximate k-nearest neighbor search library using Hilbert curves.
 
+# SISAP2025 Info BEGIN
+
+## Steps for running
+
+Please refer to the Dockerfile for environment setup instructions.
+
+### Clone this repository
+
+```bash
+git clone https://github.com/colun/hforest.git
+cd hforest
+```
+
+### Run
+
+Build the C++ extension module first:
+
+```bash
+make
+```
+
+Note: If using the provided Dockerfile, the build step is already completed and you can skip this step.
+
+Then run the tasks on an example input using:
+
+```bash
+python sisap2025.py task1
+# or
+python sisap2025.py task2
+```
+
+The necessary sample datasets will be provided by the contest organizers. 
+Please place the files in the `./data` folder with their original filenames as shown in GitHub Actions.
+
+### Evaluation
+
+Evaluation is performed automatically during execution.
+
+# SISAP2025 Info END
+
+# HilbertForest
+
+HilbertForest is an approximate k-nearest neighbor search library using Hilbert curves.
+
 ## Features
 
 - Spatial indexing using Hilbert curves
@@ -36,7 +80,7 @@ Performance may degrade for data that significantly deviates from these conditio
 
 ### Constructor Parameters
 
-- `db_path` (str, default="db"): Directory for index file storage
+- `db_path` (str, default=""): Directory for index file storage (empty string for in-memory only mode)
 - `ntrees` (int, default=10): Number of trees to build (trade-off between accuracy and speed)
 - `leaf_size` (int, default=1): Minimum leaf node size
 - `verbose` (int, default=1): Verbosity level (0: silent, 1: normal, 2: detailed)
