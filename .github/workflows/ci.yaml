@@ -699,11 +699,23 @@ jobs:
           free
 
   task1faiss:
-    if: ${{ false }}
+    #if: ${{ false }}
     name: Task 1 FAISS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check space before expand swapfile
+        run: |
+          df -h
+          free
+      - name: Expand swapfile
+        run: |
+          sudo swapoff -a
+          sudo rm /mnt/swapfile
+          sudo fallocate -l 69G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
       - name: Check space before cleanup
         run: |
           df -h
