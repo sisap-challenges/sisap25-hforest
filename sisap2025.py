@@ -67,14 +67,6 @@ def run(task, verbose_level, args):
 
         leaf_size = 100
         hyper_params = [
-            (160, 2024, 2025, 450, 2),
-            (160, 2024, 2025, 440, 2), # 77.0294% 18.785sec
-            (160, 1920, 1921, 430, 2),
-            (160, 1920, 1921, 420, 2), # 76.0097% 17.005sec
-            (160, 1740, 1741, 410, 2),
-            (160, 1740, 1741, 400, 2), # 75.0791% 15.710sec
-            (160, 1580, 1581, 390, 2),
-            (160, 1580, 1581, 380, 2), # 74.1115% 14.706sec
             (160, 1420, 1421, 370, 2),
             (160, 1420, 1421, 360, 2), # 73.0064% 12.968sec
             (160, 1300, 1301, 350, 2),
@@ -84,6 +76,17 @@ def run(task, verbose_level, args):
             (160, 1100, 1101, 310, 2),
             (160, 1100, 1101, 300, 2), # 70.0600% 10.504sec
         ]
+        if task[-6:] == '_shino':
+            hyper_params = [
+                (120, 4000, 4001, 1000, 2),# 79.07% 43.98sec
+                (120, 3200, 3201, 1000, 2),#
+                (120, 2800, 2801, 1000, 2),#
+                (120, 2400, 2401, 1000, 2),#
+                (120, 2000, 2001, 1000, 2),#
+                (120, 1800, 1801, 1000, 2),#
+                (120, 1600, 1601, 1000, 2),# 70.27% 25.59sec
+                (120, 1600, 1601, 800, 2), # 70.05% 23.84sec
+            ]
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
@@ -138,7 +141,7 @@ def run(task, verbose_level, args):
     start_time = time.time()
     fitted = False
     
-    if task == 'task1wf':
+    if task[:7] == 'task1wf':
         # Use preload feature for task1wf
         print("Using preload feature...")
         index.preload(data)
@@ -204,8 +207,8 @@ def run(task, verbose_level, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='HilbertForest approximate nearest neighbor search example')
-    parser.add_argument('task', choices=['task1', 'task2', 'task1wf', 'task2old', 'task2:85', 'task2:90', 'task2:95', 'task2:98'],
-                        help='Task type to execute (task1, task2, task1wf, task2old, task2:85, task2:90, task2:95, task2:98)')
+    parser.add_argument('task', choices=['task1', 'task1_shino', 'task2', 'task1wf', 'task1wf_shino', 'task2old', 'task2:85', 'task2:90', 'task2:95', 'task2:98'],
+                        help='Task type to execute (task1, task1_shino, task2, task1wf, task1wf_shino, task2old, task2:85, task2:90, task2:95, task2:98)')
     
     parser.add_argument(
         '--verbose',

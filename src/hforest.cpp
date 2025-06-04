@@ -593,8 +593,8 @@ public:
         size_t block_mask = block_size - 1;
         
         // Pre-allocate quantized queries buffer (for tree search)
-        size_t max_query_data_size = ((size_t)max_batch_queries * dimensions * bitDepth + 7) >> 3;
-        uint8_t* quantized_queries = (uint8_t*)malloc(max_query_data_size + 8);
+        size_t max_query_data_size = (((size_t)max_batch_queries * dimensions * bitDepth + 7) >> 3) + 16;
+        uint8_t* quantized_queries = (uint8_t*)malloc(max_query_data_size);
         assert(quantized_queries != nullptr && "Failed to allocate memory for quantized queries");
         
         // Pre-allocate scaled float queries buffer (for distance calculation)

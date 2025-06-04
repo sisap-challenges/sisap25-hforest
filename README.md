@@ -30,8 +30,16 @@ Then run the tasks on an example input using:
 ```bash
 python sisap2025.py task1
 # or
+python sisap2025.py task1_shino
+# or
 python sisap2025.py task2
 ```
+
+Note on task1 variations:
+- `task1`: This is the version tuned by Imamura(colun), which executes with 8 out of 16 hyperparameters optimized for the task1.
+- `task1_shino`: This is the version tuned by Shinohara, which executes with the remaining 8 out of 16 hyperparameters optimized for the task1. This version is specifically adjusted to run with zero swap size when launching the Docker container, optimized for low memory usage.
+
+These complementary configurations allow for comprehensive evaluation across different hyperparameter optimization strategies.
 
 The necessary sample datasets will be provided by the contest organizers. 
 Please place the files in the `./data` folder with their original filenames as shown in GitHub Actions.
