@@ -67,6 +67,14 @@ def run(task, verbose_level, args):
 
         leaf_size = 100
         hyper_params = [
+            (160, 2024, 2025, 450, 2),
+            (160, 2024, 2025, 440, 2), # 77.0294% 18.785sec
+            (160, 1920, 1921, 430, 2),
+            (160, 1920, 1921, 420, 2), # 76.0097% 17.005sec
+            (160, 1740, 1741, 410, 2),
+            (160, 1740, 1741, 400, 2), # 75.0791% 15.710sec
+            (160, 1580, 1581, 390, 2),
+            (160, 1580, 1581, 380, 2), # 74.1115% 14.706sec
             (160, 1420, 1421, 370, 2),
             (160, 1420, 1421, 360, 2), # 73.0064% 12.968sec
             (160, 1300, 1301, 350, 2),
@@ -76,17 +84,6 @@ def run(task, verbose_level, args):
             (160, 1100, 1101, 310, 2),
             (160, 1100, 1101, 300, 2), # 70.0600% 10.504sec
         ]
-        if task[-6:] == '_shino':
-            hyper_params = [
-                (120, 4000, 4001, 1000, 2),# 79.07% 43.98sec
-                (120, 3200, 3201, 1000, 2),#
-                (120, 2800, 2801, 1000, 2),#
-                (120, 2400, 2401, 1000, 2),#
-                (120, 2000, 2001, 1000, 2),#
-                (120, 1800, 1801, 1000, 2),#
-                (120, 1600, 1601, 1000, 2),# 70.27% 25.59sec
-                (120, 1600, 1601, 800, 2), # 70.05% 23.84sec
-            ]
         
     elif task[:5] == 'task2':
         dataset = 'gooaq'
@@ -97,25 +94,25 @@ def run(task, verbose_level, args):
         f_data = h5py.File('data/benchmark-dev-gooaq.h5', 'r')
         queries = data = np.array(f_data['train'])
         
-        f_gt = h5py.File('data/allknn-benchmark-dev-gooaq.h5', 'r')
-        gt_I = np.array(f_gt['knns'])
-        f_gt.close()
+       # f_gt = h5py.File('data/allknn-benchmark-dev-gooaq.h5', 'r')
+       # gt_I = np.array(f_gt['knns'])
+       # f_gt.close()
 
-        print(f"Processing ground truth: removing self-references and adjusting to k={k}")
-        gt_process_start = time.time()
-        processed_gt = []
-        for i in range(gt_I.shape[0]):
-            # Create new result row without self-reference
-            nearest_neighbors = []
-            for j in gt_I[i]:
-                if j != i+1:  # Skip self (1-indexed)
-                    nearest_neighbors.append(j)
-                    if len(nearest_neighbors) >= k:
-                        break
-            processed_gt.append(nearest_neighbors)
-        gt_I = np.array(processed_gt)
-        gt_process_end = time.time()
-        print(f"Ground truth processing completed in {gt_process_end - gt_process_start:.3f} seconds")
+       # print(f"Processing ground truth: removing self-references and adjusting to k={k}")
+       # gt_process_start = time.time()
+       # processed_gt = []
+       # for i in range(gt_I.shape[0]):
+       #     # Create new result row without self-reference
+       #     nearest_neighbors = []
+       #     for j in gt_I[i]:
+       #         if j != i+1:  # Skip self (1-indexed)
+       #             nearest_neighbors.append(j)
+       #             if len(nearest_neighbors) >= k:
+       #                 break
+       #     processed_gt.append(nearest_neighbors)
+       # gt_I = np.array(processed_gt)
+       # gt_process_end = time.time()
+       # print(f"Ground truth processing completed in {gt_process_end - gt_process_start:.3f} seconds")
 
         leaf_size = 10
         # SISAP 2025 Python Example's 81.25% == Problem's 80.00%
@@ -141,7 +138,7 @@ def run(task, verbose_level, args):
     start_time = time.time()
     fitted = False
     
-    if task[:7] == 'task1wf':
+    if task == 'task1wf':
         # Use preload feature for task1wf
         print("Using preload feature...")
         index.preload(data)
@@ -200,15 +197,15 @@ def run(task, verbose_level, args):
         store_results(os.path.join("results/", dataset, task, f"hforest_{identifier}.h5"), 
                      "hforest", dataset, task, D, I, build_time, elapsed_search, identifier)
 
-        recall = get_recall(I, gt_I, k)
-        print(f"Recall: {recall * 100.0}%")
+        #recall = get_recall(I, gt_I, k)
+        #print(f"Recall: {recall * 100.0}%")
         
         print(f"search_ntrees={search_trees}, even={even}, odd={odd}, dist={dist}, hops={hops}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='HilbertForest approximate nearest neighbor search example')
-    parser.add_argument('task', choices=['task1', 'task1_shino', 'task2', 'task1wf', 'task1wf_shino', 'task2old', 'task2:85', 'task2:90', 'task2:95', 'task2:98'],
-                        help='Task type to execute (task1, task1_shino, task2, task1wf, task1wf_shino, task2old, task2:85, task2:90, task2:95, task2:98)')
+    parser.add_argument('task', choices=['task1', 'task2', 'task1wf', 'task2old', 'task2:85', 'task2:90', 'task2:95', 'task2:98'],
+                        help='Task type to execute (task1, task2, task1wf, task2old, task2:85, task2:90, task2:95, task2:98)')
     
     parser.add_argument(
         '--verbose',
