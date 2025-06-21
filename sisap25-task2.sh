@@ -19,6 +19,8 @@ docker run \
     -it \
     --cpus=8 \
     --memory=16g \
+    --memory-swappiness 0 \
+    --memory-swap 16g \
     --network none \
     --volume $PATH_TO_HOST_DIR:$PATH_TO_CONTAINER_DIR:ro \
     --volume $OUT_PATH_TO_HOST_DIR:$OUT_PATH_TO_CONTAINER_DIR:rw \

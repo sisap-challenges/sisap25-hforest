@@ -35,8 +35,6 @@ function report_task1(D, team, path="results-task1/pubmed*/task1/*.h5", k=30)
             end
         end
     end
-
-    sort!(D, :recall)
 end
 
 function report_task2(D, team, path="results-task2/gooaq/task2/*.h5", k=15)

@@ -14,7 +14,7 @@ ls
 echo "==== environment"
 set
 echo "==== RUN BEGINS $(date)"
-#docker run --rm --memory=16g --memory-swap=16g -v <path to benchmark-dev-pubmed23.h5>:/app/data/benchmark-dev-pubmed23.h5:ro   -v <path to directory for result files>:/app/result doublefiltering /bin/bash /app/autoexec_all.sh
+
 docker run \
     -it \
     --cpus=8 \
@@ -24,7 +24,8 @@ docker run \
     --volume $OUT_PATH_TO_HOST_DIR:$OUT_PATH_TO_CONTAINER_DIR:rw \
       sisap25/hforest python sisap2025.py task1
     #--memory-swap=16g \
-
+    #--memory-swap 16g \
+    #--memory-swappiness 0 \
 
 echo "==== RUN ENDS $(date)"
 
